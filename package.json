@@ -9,7 +9,8 @@
 	"scripts": {
 		"start": "node app.js",
 		"dev": "nodemon app.js",
-		"init-db": "node database/init-db.js"
+		"init-db": "node database/init-db.js",
+		"strip-db": "node database/strip-db.js"
 	},
 	"dependencies": {
 		"better-sqlite3": "^12.9.0",

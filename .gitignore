@@ -2,3 +2,8 @@ node_modules
 reference
 teams-state.json
 database/*.db
+database/*.db-wal
+database/*.db-shm
+database/*.db-journal
+database/*.sqlite
+database/*.sqlite-*
