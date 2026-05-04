@@ -1,4 +1,4 @@
 node_modules
-.env
+reference
 teams-state.json
-test.json
+database/*.db

@@ -11,6 +11,7 @@ const storageStateExists = fs.existsSync(storageStatePath);
 // Teams uses multiple different auth tokens for different endpoints; I hate it.
 let PRIMARY_AUTH_TOKEN = null;
 let ME_AUTH_TOKEN = null;
+let MESSAGES_AUTH_TOKEN = null;
 
 // State
 let isStarted = false;
@@ -18,6 +19,7 @@ let isStarted = false;
 // Urls
 const meUrl = "https://teams.cloud.microsoft/api/csa/amer/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true&supportsAdditionalSystemGeneratedFolders=true&supportsSliceItems=true&enableEngageCommunities=false";
 const profileUrl = "https://teams.cloud.microsoft/api/mt/amer/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true";
+const initialMessagesUrl = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/IDHERE/messages?pageSize=200";
 
 // Initialize a playwright instance to login to Teams
 const browser = await chromium.launch({ headless: false });
@@ -25,16 +27,24 @@ const context = await browser.newContext({ storageState: storageStateExists ? st
 const page = await context.newPage();
 await page.goto('https://teams.cloud.microsoft');
 
+function buildMessagesUrl(chatId) {
+    return initialMessagesUrl.replace("IDHERE", chatId);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function getDirectMessageUsers(chats) {
-    const userIds = [];
+    const usersMap = new Map();
 
     for (const chat of chats) {
         if (!chat.isOneOnOne) {
             continue;
         }
 
-        const userId = chat.members[0].mri;
-        userIds.push(userId);
+        const usersMri = chat.members[0].mri;
+        usersMap.set(usersMri, chat.id);
     }
 
     const profiles = await fetch(profileUrl, {
@@ -43,10 +53,16 @@ async function getDirectMessageUsers(chats) {
             "authorization": PRIMARY_AUTH_TOKEN,
             "content-type": "application/json;charset=UTF-8",
         },
-        body: JSON.stringify(userIds),
+        body: JSON.stringify(Array.from(usersMap.keys())),
     });
 
+    // Get the profile data and add the chat id to the profile
     const profilesData = await profiles.json();
+    for (const profile of profilesData.value) {
+        const chatId = usersMap.get(profile.mri);
+        profile.id = chatId;
+    }
+
     return profilesData;
 }
 
@@ -71,6 +87,7 @@ async function selectChats(combinedChats, pageSize = 10) {
             processedChats.push({
                 name: chat.displayName,
                 mri: chat.mri,
+                id: chat.id,
             });
         }
 
@@ -78,6 +95,7 @@ async function selectChats(combinedChats, pageSize = 10) {
             processedChats.push({
                 name: chat.title,
                 mri: chat.mri,
+                id: chat.id,
             });
         }
     }
@@ -183,7 +201,43 @@ async function selectChats(combinedChats, pageSize = 10) {
     });
 }
 
+async function getMessages(chatId) {
+    const messagesUrl = buildMessagesUrl(chatId);
+    const initialMessagesResponse = await fetch(messagesUrl, {
+        method: "GET",
+        headers: {
+            "authorization": MESSAGES_AUTH_TOKEN,
+        }
+    });
+
+    const messagesData = await initialMessagesResponse.json();
+    let backwardsLink = messagesData._metadata.backwardLink; // Holds the link to the previous page of messages
+    let latestMessages = messagesData.messages;
+
+    // Loop through request 
+    while (latestMessages.length > 0) {
+        const messagesResponse = await fetch(backwardsLink, {
+            method: "GET",
+            headers: {
+                "authorization": MESSAGES_AUTH_TOKEN,
+            }
+        });
+
+        const messagesData = await messagesResponse.json();
+
+        console.log(messagesData);
+
+        backwardsLink = messagesData._metadata.backwardLink;
+        latestMessages = messagesData.messages;
+        await sleep(2000);
+    }
+
+    return messagesData;
+}
+
 async function start() {
+    // Save state so that we do not have to login every time we start the script
+    await context.storageState({ path: "teams-state.json" });
     browser.close();
 
     const meResponse = await fetch(meUrl, {
@@ -206,14 +260,10 @@ async function start() {
 
     const selectedChats = await selectChats(combinedChats);
     console.log(selectedChats);
-
+    
     for (const chat of selectedChats) {
-        const messages = await getMessages(chat.mri);
-        console.log(messages);
-    }
-
-    // Save state so that we do not have to login every time we start the script
-    await context.storageState({ path: "teams-state.json" });
+        const messages = await getMessages(chat.id);
+    }    
 }
 
 page.on("request", async (request) => {
@@ -227,7 +277,12 @@ page.on("request", async (request) => {
         PRIMARY_AUTH_TOKEN = headers.authorization;
     }
 
-    if (PRIMARY_AUTH_TOKEN && ME_AUTH_TOKEN && !isStarted) {
+    if (requestUrl.includes("https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/")) {
+        MESSAGES_AUTH_TOKEN = headers.authorization;
+        console.log("SET");
+    }
+
+    if (PRIMARY_AUTH_TOKEN && ME_AUTH_TOKEN && MESSAGES_AUTH_TOKEN && !isStarted) {
         isStarted = true;
         start();
     }
