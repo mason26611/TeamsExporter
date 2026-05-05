@@ -3,12 +3,19 @@ import path from 'node:path';
 import chalk from "chalk";
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'node:url';
+import { Logger } from '../modules/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultDbPath = path.join(__dirname, 'database.db');
 const initSqlPath = path.join(__dirname, 'init.sql');
 
+/**
+ * Parses command line arguments for database initialization.
+ *
+ * @param {string[]} argv - Command line arguments after the script path.
+ * @returns {{dbPath: string, help: boolean}} Parsed options.
+ */
 function parseArgs(argv) {
     let dbPath = defaultDbPath;
     let help = false;
@@ -28,6 +35,11 @@ function parseArgs(argv) {
     return { dbPath, help };
 }
 
+/**
+ * Prints database initialization help text.
+ *
+ * @returns {void}
+ */
 function printHelp() {
     console.log(`Usage: npm run init-db -- [options]
 
@@ -37,6 +49,11 @@ Options:
 `);
 }
 
+/**
+ * Initializes the SQLite database from init.sql.
+ *
+ * @returns {void}
+ */
 function main() {
     const options = parseArgs(process.argv.slice(2));
 
@@ -50,6 +67,11 @@ function main() {
     }
 
     fs.mkdirSync(path.dirname(options.dbPath), { recursive: true });
+
+    if (fs.existsSync(options.dbPath)) {
+        Logger.warning('Database already exists. Please remove it before initializing a new one.');
+        return;
+    }
 
     const database = new Database(options.dbPath);
     database.pragma('foreign_keys = ON');

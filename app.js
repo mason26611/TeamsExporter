@@ -1,289 +1,122 @@
-import fs from 'fs';
-import fetch from 'node-fetch';
+import path from 'node:path';
 import chalk from 'chalk';
-import readline from 'readline'
-import { chromium } from 'playwright';
+import { selectBackupMode } from './modules/backup-mode-selector.js';
+import { selectChats } from './modules/chat-selector.js';
+import { defaultDbPath, defaultStorageStatePath } from './modules/config.js';
+import { openTeamsDatabase } from './modules/database.js';
+import { exportSelectedChats } from './modules/exporter.js';
+import { captureTeamsAuth } from './modules/teams-auth.js';
+import { createTeamsApi, getGroupChats } from './modules/teams-api.js';
+import { Logger } from './modules/logger.js';
 
-const storageStatePath = 'teams-state.json';
-const storageStateExists = fs.existsSync(storageStatePath);
+/**
+ * Parses command line arguments for the exporter.
+ *
+ * @param {string[]} argv - Command line arguments after the Node executable and script path.
+ * @returns {{dbPath: string, help: boolean, pageSize: number, storageStatePath: string}} Parsed options.
+ */
+function parseArgs(argv) {
+    const options = {
+        dbPath: defaultDbPath,
+        help: false,
+        pageSize: 10,
+        storageStatePath: defaultStorageStatePath,
+    };
 
-// Authorization tokens
-// Teams uses multiple different auth tokens for different endpoints; I hate it.
-let PRIMARY_AUTH_TOKEN = null;
-let ME_AUTH_TOKEN = null;
-let MESSAGES_AUTH_TOKEN = null;
+    for (let i = 0; i < argv.length; i++) {
+        const arg = argv[i];
 
-// State
-let isStarted = false;
+        if (arg === '--help' || arg === '-h') {
+            options.help = true;
+        } else if (arg === '--db') {
+            options.dbPath = path.resolve(argv[++i]);
+        } else if (arg === '--storage-state') {
+            options.storageStatePath = path.resolve(argv[++i]);
+        } else if (arg === '--page-size') {
+            options.pageSize = Number.parseInt(argv[++i], 10);
+        } else {
+            throw new Error(`Unknown argument: ${arg}`);
+        }
+    }
 
-// Urls
-const meUrl = "https://teams.cloud.microsoft/api/csa/amer/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true&supportsAdditionalSystemGeneratedFolders=true&supportsSliceItems=true&enableEngageCommunities=false";
-const profileUrl = "https://teams.cloud.microsoft/api/mt/amer/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true";
-const initialMessagesUrl = "https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/IDHERE/messages?pageSize=200";
+    if (!Number.isInteger(options.pageSize) || options.pageSize < 1) {
+        throw new Error('--page-size must be a positive integer.');
+    }
 
-// Initialize a playwright instance to login to Teams
-const browser = await chromium.launch({ headless: false });
-const context = await browser.newContext({ storageState: storageStateExists ? storageStatePath : undefined });
-const page = await context.newPage();
-await page.goto('https://teams.cloud.microsoft');
-
-function buildMessagesUrl(chatId) {
-    return initialMessagesUrl.replace("IDHERE", chatId);
+    return options;
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+/**
+ * Prints CLI usage information.
+ *
+ * @returns {void}
+ */
+function printHelp() {
+    console.log(`Usage: npm start -- [options]
+
+Options:
+  --db <path>               SQLite database path. Default: database/database.db
+  --storage-state <path>    Playwright storage state path. Default: teams-state.json
+  --page-size <number>      Chat selector page size. Default: 10
+  --help                    Show this help text
+`);
 }
 
-async function getDirectMessageUsers(chats) {
-    const usersMap = new Map();
+/**
+ * Runs the Teams exporter from authentication through selected chat export.
+ *
+ * @returns {Promise<void>} Resolves when the export finishes.
+ */
+async function main() {
+    const options = parseArgs(process.argv.slice(2));
 
-    for (const chat of chats) {
-        if (!chat.isOneOnOne) {
-            continue;
-        }
-
-        const usersMri = chat.members[0].mri;
-        usersMap.set(usersMri, chat.id);
+    if (options.help) {
+        printHelp();
+        return;
     }
 
-    const profiles = await fetch(profileUrl, {
-        method: "POST",
-        headers: {
-            "authorization": PRIMARY_AUTH_TOKEN,
-            "content-type": "application/json;charset=UTF-8",
-        },
-        body: JSON.stringify(Array.from(usersMap.keys())),
-    });
+    Logger.header('Teams Exporter');
+    Logger.info(`Database: ${chalk.white(options.dbPath)}`);
 
-    // Get the profile data and add the chat id to the profile
-    const profilesData = await profiles.json();
-    for (const profile of profilesData.value) {
-        const chatId = usersMap.get(profile.mri);
-        profile.id = chatId;
-    }
+    const database = openTeamsDatabase(options.dbPath);
 
-    return profilesData;
-}
-
-function getGroupChats(chats) {
-    const groupChats = [];
-    for (const chat of chats) {
-        if (chat.isOneOnOne) {
-            continue;
-        }
-
-        groupChats.push(chat);
-    }
-
-    return groupChats;
-}
-
-async function selectChats(combinedChats, pageSize = 10) {
-    const processedChats = [];
-
-    for (const chat of combinedChats) {
-        if (chat.displayName) {
-            processedChats.push({
-                name: chat.displayName,
-                mri: chat.mri,
-                id: chat.id,
-            });
-        }
-
-        if (chat.title) {
-            processedChats.push({
-                name: chat.title,
-                mri: chat.mri,
-                id: chat.id,
-            });
-        }
-    }
-
-    let cursor = 0;
-    let page = 0;
-    const selected = new Set();
-
-    const totalPages = Math.max(1, Math.ceil(processedChats.length / pageSize));
-
-    readline.emitKeypressEvents(process.stdin);
-
-    if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
-    }
-
-    function getPageItems() {
-        const start = page * pageSize;
-        const end = start + pageSize;
-
-        return processedChats.slice(start, end).map((chat, offset) => ({
-            ...chat,
-            index: start + offset,
-        }));
-    }
-
-    function render() {
-        console.clear();
-
-        console.log("Select chats");
-        console.log("↑/↓ move | Space select | ←/→ page | Enter confirm | Ctrl+C exit");
-        console.log(`Page ${page + 1}/${totalPages} | Selected: ${selected.size}\n`);
-
-        const pageItems = getPageItems();
-
-        for (let i = 0; i < pageItems.length; i++) {
-            const chat = pageItems[i];
-
-            const pointer = i === cursor ? "➜" : " ";
-            const bubble = selected.has(chat.index) ? "●" : "○";
-
-            console.log(`${pointer} ${bubble} ${chat.name}`);
-        }
-    }
-
-    return new Promise((resolve) => {
-        render();
-
-        process.stdin.on("keypress", (_str, key) => {
-            if (key.ctrl && key.name === "c") {
-                process.exit();
-            }
-
-            const pageItems = getPageItems();
-
-            if (key.name === "up") {
-                cursor = Math.max(0, cursor - 1);
-                render();
-            }
-
-            if (key.name === "down") {
-                cursor = Math.min(pageItems.length - 1, cursor + 1);
-                render();
-            }
-
-            if (key.name === "left") {
-                page = Math.max(0, page - 1);
-                cursor = 0;
-                render();
-            }
-
-            if (key.name === "right") {
-                page = Math.min(totalPages - 1, page + 1);
-                cursor = 0;
-                render();
-            }
-
-            if (key.name === "space") {
-                const selectedIndex = pageItems[cursor]?.index;
-
-                if (selectedIndex !== undefined) {
-                    if (selected.has(selectedIndex)) {
-                        selected.delete(selectedIndex);
-                    } else {
-                        selected.add(selectedIndex);
-                    }
-                }
-
-                render();
-            }
-
-            if (key.name === "return") {
-                if (process.stdin.isTTY) {
-                    process.stdin.setRawMode(false);
-                }
-
-                console.clear();
-
-                const chosenChats = [...selected].map(index => processedChats[index]);
-                resolve(chosenChats);
-            }
+    try {
+        const auth = await captureTeamsAuth({
+            storageStatePath: options.storageStatePath,
+            onStatus: Logger.info,
         });
-    });
-}
+        const api = createTeamsApi(auth);
 
-async function getMessages(chatId) {
-    const messagesUrl = buildMessagesUrl(chatId);
-    const initialMessagesResponse = await fetch(messagesUrl, {
-        method: "GET",
-        headers: {
-            "authorization": MESSAGES_AUTH_TOKEN,
+        Logger.info('Loading chat list from Teams...');
+        const meData = await api.getMe();
+        const directMessageUsers = await api.getDirectMessageUsers(meData.chats ?? []);
+        const groupChats = getGroupChats(meData.chats ?? []);
+        const combinedChats = [...directMessageUsers.value, ...groupChats];
+
+        const selectedChats = await selectChats(combinedChats, options.pageSize);
+
+        if (selectedChats.length === 0) {
+            Logger.warning('No chats selected. Nothing to export.');
+            return;
         }
-    });
 
-    const messagesData = await initialMessagesResponse.json();
-    let backwardsLink = messagesData._metadata.backwardLink; // Holds the link to the previous page of messages
-    let latestMessages = messagesData.messages;
+        const mode = await selectBackupMode();
+        Logger.info(`Mode: ${chalk.white(mode)}`);
 
-    // Loop through request 
-    while (latestMessages.length > 0) {
-        const messagesResponse = await fetch(backwardsLink, {
-            method: "GET",
-            headers: {
-                "authorization": MESSAGES_AUTH_TOKEN,
-            }
+        await exportSelectedChats({
+            api,
+            database,
+            mode,
+            selectedChats,
         });
 
-        const messagesData = await messagesResponse.json();
-
-        console.log(messagesData);
-
-        backwardsLink = messagesData._metadata.backwardLink;
-        latestMessages = messagesData.messages;
-        await sleep(2000);
+        Logger.success('Export complete.');
+    } finally {
+        database.close();
     }
-
-    return messagesData;
 }
 
-async function start() {
-    // Save state so that we do not have to login every time we start the script
-    await context.storageState({ path: "teams-state.json" });
-    browser.close();
-
-    const meResponse = await fetch(meUrl, {
-        method: "GET",
-        headers: {
-            "authorization": ME_AUTH_TOKEN,
-        }
-    });
-
-    const meData = await meResponse.json();
-
-    // Collect all one-on-one chats for the user
-    const chats = meData.chats;
-    const directMessageUsers = await getDirectMessageUsers(chats);
-    const groupChats = getGroupChats(chats);
-
-    const combinedChats = [];
-    combinedChats.push(...directMessageUsers.value);
-    combinedChats.push(...groupChats);
-
-    const selectedChats = await selectChats(combinedChats);
-    console.log(selectedChats);
-    
-    for (const chat of selectedChats) {
-        const messages = await getMessages(chat.id);
-    }    
-}
-
-page.on("request", async (request) => {
-    const requestUrl = request.url();
-    const headers = request.headers();
-    if (requestUrl.includes(meUrl)) {
-        ME_AUTH_TOKEN = headers.authorization;
-    }
-
-    if (requestUrl.includes(profileUrl)) {
-        PRIMARY_AUTH_TOKEN = headers.authorization;
-    }
-
-    if (requestUrl.includes("https://teams.cloud.microsoft/api/chatsvc/amer/v1/users/ME/conversations/")) {
-        MESSAGES_AUTH_TOKEN = headers.authorization;
-        console.log("SET");
-    }
-
-    if (PRIMARY_AUTH_TOKEN && ME_AUTH_TOKEN && MESSAGES_AUTH_TOKEN && !isStarted) {
-        isStarted = true;
-        start();
-    }
+main().catch((error) => {
+    Logger.error(error);
+    process.exitCode = 1;
 });
