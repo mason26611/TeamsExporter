@@ -10,12 +10,6 @@ const __dirname = path.dirname(__filename);
 const defaultDbPath = path.join(__dirname, 'database.db');
 const initSqlPath = path.join(__dirname, 'init.sql');
 
-/**
- * Parses command line arguments for database initialization.
- *
- * @param {string[]} argv - Command line arguments after the script path.
- * @returns {{dbPath: string, help: boolean}} Parsed options.
- */
 function parseArgs(argv) {
     let dbPath = defaultDbPath;
     let help = false;
@@ -35,11 +29,6 @@ function parseArgs(argv) {
     return { dbPath, help };
 }
 
-/**
- * Prints database initialization help text.
- *
- * @returns {void}
- */
 function printHelp() {
     console.log(`Usage: npm run init-db -- [options]
 
@@ -49,11 +38,6 @@ Options:
 `);
 }
 
-/**
- * Initializes the SQLite database from init.sql.
- *
- * @returns {void}
- */
 function main() {
     const options = parseArgs(process.argv.slice(2));
 

@@ -1,5 +1,7 @@
 node_modules
 reference
+.env
+media/
 teams-state.json
 database/*.db
 database/*.db-wal

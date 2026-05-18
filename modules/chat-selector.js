@@ -1,12 +1,6 @@
 import chalk from 'chalk';
 import readline from 'node:readline';
 
-/**
- * Converts raw Teams chat/profile objects into selector-friendly rows.
- *
- * @param {Array<object>} combinedChats - Direct-message profiles and group chats.
- * @returns {Array<object>} Normalized selector rows.
- */
 function normalizeSelectableChats(combinedChats) {
     const processedChats = [];
 
@@ -27,12 +21,6 @@ function normalizeSelectableChats(combinedChats) {
     return processedChats.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/**
- * Enables raw keyboard input when the terminal supports it.
- * This allows the app to receive keypress events from the terminal without waiting for the user to press enter.
- *
- * @returns {void}
- */
 function enableRawInput() {
     readline.emitKeypressEvents(process.stdin);
 
@@ -41,24 +29,12 @@ function enableRawInput() {
     }
 }
 
-/**
- * Restores normal keyboard input when the terminal supports it.
- *
- * @returns {void}
- */
 function disableRawInput() {
     if (process.stdin.isTTY) {
         process.stdin.setRawMode(false);
     }
 }
 
-/**
- * Shows the interactive bubble selector and resolves with chosen chats.
- *
- * @param {Array<object>} combinedChats - Direct-message profiles and group chat objects.
- * @param {number} [pageSize=10] - Number of chats to show per page.
- * @returns {Promise<Array<object>>} Selected chat objects.
- */
 export async function selectChats(combinedChats, pageSize = 10) {
     const processedChats = normalizeSelectableChats(combinedChats);
     let cursor = 0;
@@ -68,11 +44,6 @@ export async function selectChats(combinedChats, pageSize = 10) {
 
     enableRawInput();
 
-    /**
-     * Returns chats visible on the current selector page.
-     *
-     * @returns {Array<object>} Page chat rows with global indexes.
-     */
     function getPageItems() {
         const start = page * pageSize;
         const end = start + pageSize;
@@ -83,11 +54,6 @@ export async function selectChats(combinedChats, pageSize = 10) {
         }));
     }
 
-    /**
-     * Renders the current selector page.
-     *
-     * @returns {void}
-     */
     function render() {
         console.clear();
         console.log(chalk.bold.cyan('Select chats'));
@@ -112,13 +78,6 @@ export async function selectChats(combinedChats, pageSize = 10) {
     }
 
     return new Promise((resolve) => {
-        /**
-         * Handles a single keypress in the selector.
-         *
-         * @param {string} _str - Raw key string.
-         * @param {{ctrl?: boolean, name?: string}} key - Parsed key information.
-         * @returns {void}
-         */
         function onKeypress(_str, key) {
             if (key.ctrl && key.name === 'c') {
                 disableRawInput();

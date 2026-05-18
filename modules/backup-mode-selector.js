@@ -38,11 +38,6 @@ function disableRawInput() {
     }
 }
 
-/**
- * Shows an interactive mode selector for backup behavior.
- *
- * @returns {Promise<'resume' | 'backup-new' | 'backup-recent' | 'fresh'>} Selected backup mode.
- */
 export async function selectBackupMode() {
     let cursor = 0;
     enableRawInput();

@@ -1,14 +1,6 @@
 import chalk from 'chalk';
 import readline from 'node:readline';
 
-/**
- * Builds a determinate or discovered-total progress bar.
- *
- * @param {number} current - Current progress value.
- * @param {number | null} total - Total progress value, if known.
- * @param {number} width - Bar width in characters.
- * @returns {string} Rendered progress bar.
- */
 function buildProgressBar(current, total, width) {
     if (!total || total <= 0) {
         const marker = current % width;
@@ -22,13 +14,6 @@ function buildProgressBar(current, total, width) {
     return `${chalk.dim('[')}${chalk.green('='.repeat(filled))}${chalk.dim('-'.repeat(empty))}${chalk.dim(']')}`;
 }
 
-/**
- * Formats a message count with a known or unknown total.
- *
- * @param {number} current - Current message count.
- * @param {number | null} total - Total message count, if known.
- * @returns {string} Formatted count.
- */
 function formatCount(current, total) {
     if (!total || total <= 0) {
         return `${current} messages`;
@@ -38,9 +23,6 @@ function formatCount(current, total) {
     return `${current}/${total} messages (${percent}%)`;
 }
 
-/**
- * Live terminal progress UI for Teams exports.
- */
 export class ProgressTui {
     constructor({ title, totalMessages = null }) {
         this.title = title;
@@ -68,18 +50,6 @@ export class ProgressTui {
         console.log('');
     }
 
-    /**
-     * Updates the current chat being exported.
-     *
-     * @param {string} chatName - Chat display name.
-     * @param {string} mode - Export mode.
-     * @param {object} [chatProgress] - Per-chat progress context.
-     * @param {number} [chatProgress.chatCount] - Total selected chats.
-     * @param {number} [chatProgress.chatCurrentMessages] - Current messages for the active chat.
-     * @param {number} [chatProgress.chatIndex] - 1-based active chat index.
-     * @param {number | null} [chatProgress.chatTotalMessages] - Estimated total for active chat.
-     * @returns {void}
-     */
     setChat(chatName, mode, chatProgress = {}) {
         this.currentChat = chatName;
         this.currentPageMessages = 0;
@@ -91,23 +61,11 @@ export class ProgressTui {
         this.render();
     }
 
-    /**
-     * Sets the current message count.
-     *
-     * @param {number} count - Message count.
-     * @returns {void}
-     */
     setCurrentMessages(count) {
         this.currentMessages = count;
         this.render();
     }
 
-    /**
-     * Adds to the current message count.
-     *
-     * @param {number} count - Number of messages to add.
-     * @returns {void}
-     */
     incrementMessages(count) {
         this.currentMessages += count;
         this.chatCurrentMessages += count;
@@ -115,22 +73,11 @@ export class ProgressTui {
         this.render();
     }
 
-    /**
-     * Adds a short note to the TUI.
-     *
-     * @param {string} note - Note text.
-     * @returns {void}
-     */
     addNote(note) {
         this.notes = [note, ...this.notes].slice(0, 4);
         this.render();
     }
 
-    /**
-     * Renders the current TUI state.
-     *
-     * @returns {void}
-     */
     render() {
         if (!this.started && this.currentMessages === 0) {
             return;

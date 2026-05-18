@@ -29,12 +29,6 @@ function extractMri(value) {
     return decodeURIComponent(value.slice(markerIndex + marker.length));
 }
 
-/**
- * Creates a stable database user ID from a Teams user-like object.
- *
- * @param {object} user - Teams user-like payload.
- * @returns {string} Stable user identifier.
- */
 function getUserId(user) {
     return firstValue(
         user.id,
@@ -47,12 +41,6 @@ function getUserId(user) {
     ) ?? 'unknown-user';
 }
 
-/**
- * Maps a Teams user-like payload to database columns.
- *
- * @param {object} user - Teams user-like payload.
- * @returns {object} User row values.
- */
 function mapUserRow(user) {
     return {
         display_name: firstValue(user.displayName, user.imdisplayname, user.imDisplayName, user.fromDisplayNameInToken),
@@ -64,22 +52,10 @@ function mapUserRow(user) {
     };
 }
 
-/**
- * Returns the most useful last-message object from a chat-like payload.
- *
- * @param {object} chat - Teams chat-like payload.
- * @returns {object | null} Last-message payload or null.
- */
 function getLastMessage(chat) {
     return chat.lastMessage ?? chat.sourceChat?.lastMessage ?? null;
 }
 
-/**
- * Maps a Teams chat-like payload to database conversation columns.
- *
- * @param {object} chat - Teams chat-like payload.
- * @returns {object} Conversation row values.
- */
 function mapConversationRow(chat) {
     const sourceChat = chat.sourceChat ?? chat;
     const lastMessage = getLastMessage(chat);
@@ -96,14 +72,6 @@ function mapConversationRow(chat) {
     };
 }
 
-/**
- * Maps a Teams message payload to database message columns.
- *
- * @param {string} conversationId - Conversation ID that owns the message.
- * @param {object} message - Teams message payload.
- * @param {string | null} senderId - Normalized sender ID.
- * @returns {object} Message row values.
- */
 function mapMessageRow(conversationId, message, senderId) {
     return {
         compose_time: firstValue(message.composetime, message.composeTime),
@@ -119,14 +87,6 @@ function mapMessageRow(conversationId, message, senderId) {
     };
 }
 
-/**
- * Maps a Teams reaction payload to database reaction columns.
- *
- * @param {string} conversationId - Conversation ID that owns the message.
- * @param {string} messageId - Message ID that owns the reaction.
- * @param {object} reaction - Teams reaction payload.
- * @returns {object} Reaction row values.
- */
 function mapReactionRow(conversationId, messageId, reaction) {
     const user = reaction.user ?? reaction.from ?? {};
     const userId = firstValue(
@@ -146,12 +106,6 @@ function mapReactionRow(conversationId, messageId, reaction) {
     };
 }
 
-/**
- * Expands annotationsSummary emotion counts into normalized reaction entries.
- *
- * @param {object} message - Teams message payload.
- * @returns {Array<object>} Expanded reaction payloads.
- */
 function expandAnnotationSummaryReactions(message) {
     const emotions = message.annotationsSummary?.emotions;
 
@@ -177,12 +131,6 @@ function expandAnnotationSummaryReactions(message) {
     return expanded;
 }
 
-/**
- * Returns normalized message reactions from the best available payload shape.
- *
- * @param {object} message - Teams message payload.
- * @returns {Array<object>} Reaction payloads to persist.
- */
 function getMessageReactions(message) {
     const summaryReactions = expandAnnotationSummaryReactions(message);
 
@@ -193,12 +141,6 @@ function getMessageReactions(message) {
     return message.reactions ?? [];
 }
 
-/**
- * Opens and initializes the Teams SQLite database.
- *
- * @param {string} dbPath - SQLite database path.
- * @returns {TeamsDatabase} Database wrapper.
- */
 export function openTeamsDatabase(dbPath) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
@@ -209,15 +151,7 @@ export function openTeamsDatabase(dbPath) {
     return new TeamsDatabase(database);
 }
 
-/**
- * Thin persistence wrapper for Teams export data.
- */
 export class TeamsDatabase {
-    /**
-     * Creates a Teams database wrapper.
-     *
-     * @param {Database.Database} database - better-sqlite3 database instance.
-     */
     constructor(database) {
         this.database = database;
         this.upsertUserStatement = database.prepare(`
@@ -231,6 +165,7 @@ export class TeamsDatabase {
                 raw_zlib = excluded.raw_zlib,
                 imported_at = CURRENT_TIMESTAMP
         `);
+
         this.upsertConversationStatement = database.prepare(`
             INSERT INTO conversations (
                 id, team_id, source_type, display_name, description, created_at,
@@ -250,6 +185,7 @@ export class TeamsDatabase {
                 raw_zlib = excluded.raw_zlib,
                 imported_at = CURRENT_TIMESTAMP
         `);
+
         this.upsertMessageStatement = database.prepare(`
             INSERT INTO messages (
                 conversation_id, id, sequence_id, content, sender_id, sender_display_name,
@@ -270,6 +206,7 @@ export class TeamsDatabase {
                 raw_zlib = excluded.raw_zlib,
                 imported_at = CURRENT_TIMESTAMP
         `);
+
         this.deleteReactionsStatement = database.prepare('DELETE FROM message_reactions WHERE conversation_id = ? AND message_id = ?');
         this.insertReactionStatement = database.prepare(`
             INSERT INTO message_reactions (
@@ -279,8 +216,75 @@ export class TeamsDatabase {
                 @conversation_id, @message_id, @reaction_type, @user_id, @user_display_name, @created_at, @raw_zlib
             )
         `);
+
+        this.upsertMessageMediaStatement = database.prepare(`
+            INSERT INTO message_media (
+                conversation_id, message_id, media_id, source, url, original_filename, raw_json
+            )
+            VALUES (
+                @conversation_id, @message_id, @media_id, @source, @url, @original_filename, @raw_json
+            )
+            ON CONFLICT(conversation_id, message_id, media_id, url) DO UPDATE SET
+                source = excluded.source,
+                original_filename = COALESCE(excluded.original_filename, message_media.original_filename),
+                raw_json = excluded.raw_json,
+                imported_at = CURRENT_TIMESTAMP
+        `);
+
+        this.getMessageMediaStatement = database.prepare(`
+            SELECT *
+            FROM message_media
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+                AND url = ?
+            LIMIT 1
+        `);
+
+        this.markMessageMediaDownloadedStatement = database.prepare(`
+            UPDATE message_media
+            SET
+                content_type = ?,
+                byte_size = ?,
+                local_path = ?,
+                download_status = 'downloaded',
+                error = NULL,
+                downloaded_at = CURRENT_TIMESTAMP
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+                AND url = ?
+        `);
+
+        this.markMessageMediaFailedStatement = database.prepare(`
+            UPDATE message_media
+            SET
+                download_status = 'failed',
+                error = ?,
+                downloaded_at = CURRENT_TIMESTAMP
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+                AND url = ?
+        `);
+
         this.getMessageCountStatement = database.prepare('SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ?');
         this.getMessageExistsStatement = database.prepare('SELECT 1 FROM messages WHERE conversation_id = ? AND id = ? LIMIT 1');
+        this.getMessagesForMediaDownloadStatement = database.prepare(`
+            SELECT messages.conversation_id, messages.id, messages.raw_zlib, conversations.display_name AS conversation_name
+            FROM messages
+            LEFT JOIN conversations ON conversations.id = messages.conversation_id
+            ORDER BY messages.conversation_id, COALESCE(messages.sequence_id, 0), messages.id
+        `);
+
+        this.getMessagesForMediaDownloadBatchStatement = database.prepare(`
+            SELECT messages.conversation_id, messages.id, messages.raw_zlib, conversations.display_name AS conversation_name
+            FROM messages
+            LEFT JOIN conversations ON conversations.id = messages.conversation_id
+            ORDER BY messages.conversation_id, COALESCE(messages.sequence_id, 0), messages.id
+            LIMIT ? OFFSET ?
+        `);
+
         this.getMaxSequenceStatement = database.prepare('SELECT MAX(sequence_id) AS maxSequence FROM messages WHERE conversation_id = ?');
         this.getConversationSyncStateStatement = database.prepare('SELECT sync_state_url FROM conversation_sync_state WHERE conversation_id = ?');
         this.upsertConversationSyncStateStatement = database.prepare(`
@@ -290,6 +294,7 @@ export class TeamsDatabase {
                 sync_state_url = excluded.sync_state_url,
                 updated_at = CURRENT_TIMESTAMP
         `);
+
         this.saveMessageBatch = database.transaction((conversationId, messages) => {
             let saved = 0;
 
@@ -302,33 +307,16 @@ export class TeamsDatabase {
         });
     }
 
-    /**
-     * Closes the underlying SQLite database.
-     *
-     * @returns {void}
-     */
     close() {
         this.database.close();
     }
 
-    /**
-     * Inserts or updates a Teams user.
-     *
-     * @param {object} user - Teams user-like payload.
-     * @returns {string} Stable user ID.
-     */
     upsertUser(user) {
         const row = mapUserRow(user);
         this.upsertUserStatement.run(row);
         return row.id;
     }
 
-    /**
-     * Inserts or updates a Teams chat as a database conversation.
-     *
-     * @param {object} chat - Teams chat-like payload.
-     * @returns {void}
-     */
     upsertChannel(chat) {
         this.upsertConversationStatement.run(mapConversationRow(chat));
 
@@ -343,13 +331,6 @@ export class TeamsDatabase {
         }
     }
 
-    /**
-     * Inserts or updates a Teams message and its normalized reactions.
-     *
-     * @param {string} conversationId - Conversation ID that owns the message.
-     * @param {object} message - Teams message payload.
-     * @returns {void}
-     */
     upsertMessage(conversationId, message) {
         const senderMri = extractMri(message.from);
         const senderId = this.upsertUser({
@@ -386,44 +367,64 @@ export class TeamsDatabase {
         }
     }
 
-    /**
-     * Saves a batch of messages in one SQLite transaction.
-     *
-     * @param {string} conversationId - Conversation ID that owns the messages.
-     * @param {Array<object>} messages - Teams message payloads.
-     * @returns {number} Number of messages saved.
-     */
     saveMessages(conversationId, messages) {
         return this.saveMessageBatch(conversationId, messages);
     }
 
-    /**
-     * Checks whether a message is already present in the database.
-     *
-     * @param {string} conversationId - Conversation ID.
-     * @param {string} messageId - Message ID.
-     * @returns {boolean} True when the message already exists.
-     */
+    upsertMessageMedia(conversationId, messageId, media) {
+        this.upsertMessageMediaStatement.run({
+            conversation_id: conversationId,
+            message_id: String(messageId),
+            media_id: media.mediaId,
+            original_filename: media.originalFilename ?? null,
+            raw_json: JSON.stringify(media.raw ?? null),
+            source: media.source,
+            url: media.url,
+        });
+    }
+
+    getMessageMedia(conversationId, messageId, mediaId, url) {
+        return this.getMessageMediaStatement.get(conversationId, String(messageId), mediaId, url);
+    }
+
+    markMessageMediaDownloaded(conversationId, messageId, media, result) {
+        this.markMessageMediaDownloadedStatement.run(
+            result.contentType ?? null,
+            result.byteSize ?? null,
+            result.localPath ?? null,
+            conversationId,
+            String(messageId),
+            media.mediaId,
+            media.url,
+        );
+    }
+
+    markMessageMediaFailed(conversationId, messageId, media, error) {
+        this.markMessageMediaFailedStatement.run(
+            error instanceof Error ? error.message : String(error),
+            conversationId,
+            String(messageId),
+            media.mediaId,
+            media.url,
+        );
+    }
+
+    iterateMessagesForMediaDownload() {
+        return this.getMessagesForMediaDownloadStatement.iterate();
+    }
+
+    getMessagesForMediaDownloadBatch(limit, offset) {
+        return this.getMessagesForMediaDownloadBatchStatement.all(limit, offset);
+    }
+
     hasMessage(conversationId, messageId) {
         return Boolean(this.getMessageExistsStatement.get(conversationId, String(messageId)));
     }
 
-    /**
-     * Reads the saved sync-state URL for a conversation.
-     *
-     * @param {string} conversationId - Conversation ID.
-     * @returns {string | null} Sync-state URL, when present.
-     */
     getConversationSyncStateUrl(conversationId) {
         return this.getConversationSyncStateStatement.get(conversationId)?.sync_state_url ?? null;
     }
 
-    /**
-     * Saves or updates the sync-state URL for a conversation.
-     *
-     * @param {string} conversationId - Conversation ID.
-     * @param {string | null | undefined} syncStateUrl - Sync-state URL from Teams metadata.
-     */
     setConversationSyncStateUrl(conversationId, syncStateUrl) {
         if (!syncStateUrl) {
             return;
@@ -443,22 +444,10 @@ export class TeamsDatabase {
         return syncStateUrl ? { sync_state_url: syncStateUrl } : undefined;
     }
 
-    /**
-     * Counts saved messages for a conversation.
-     *
-     * @param {string} conversationId - Conversation ID.
-     * @returns {number} Message count.
-     */
     getMessageCount(conversationId) {
         return this.getMessageCountStatement.get(conversationId)?.count ?? 0;
     }
 
-    /**
-     * Reads the largest saved Teams sequence ID for a conversation.
-     *
-     * @param {string} conversationId - Conversation ID.
-     * @returns {number} Largest sequence ID, or zero when no messages are saved.
-     */
     getMaxSequence(conversationId) {
         return this.getMaxSequenceStatement.get(conversationId)?.maxSequence ?? 0;
     }

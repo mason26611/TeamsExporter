@@ -2,7 +2,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 import { selectBackupMode } from './modules/backup-mode-selector.js';
 import { selectChats } from './modules/chat-selector.js';
-import { defaultDbPath, defaultStorageStatePath } from './modules/config.js';
+import { defaultDbPath, defaultMediaDir, defaultStorageStatePath, downloadMediaByDefault } from './modules/config.js';
 import { openTeamsDatabase } from './modules/database.js';
 import { exportSelectedChats } from './modules/exporter.js';
 import { captureTeamsAuth } from './modules/teams-auth.js';
@@ -13,12 +13,15 @@ import { Logger } from './modules/logger.js';
  * Parses command line arguments for the exporter.
  *
  * @param {string[]} argv - Command line arguments after the Node executable and script path.
- * @returns {{dbPath: string, help: boolean, pageSize: number, storageStatePath: string}} Parsed options.
+ * @returns {{dbPath: string, downloadMedia: boolean, help: boolean, mediaConcurrency: number, mediaDir: string, pageSize: number, storageStatePath: string}} Parsed options.
  */
 function parseArgs(argv) {
     const options = {
         dbPath: defaultDbPath,
+        downloadMedia: downloadMediaByDefault,
         help: false,
+        mediaConcurrency: 4,
+        mediaDir: defaultMediaDir,
         pageSize: 10,
         storageStatePath: defaultStorageStatePath,
     };
@@ -32,6 +35,14 @@ function parseArgs(argv) {
             options.dbPath = path.resolve(argv[++i]);
         } else if (arg === '--storage-state') {
             options.storageStatePath = path.resolve(argv[++i]);
+        } else if (arg === '--download-media') {
+            options.downloadMedia = true;
+        } else if (arg === '--no-download-media') {
+            options.downloadMedia = false;
+        } else if (arg === '--media-dir') {
+            options.mediaDir = path.resolve(argv[++i]);
+        } else if (arg === '--media-concurrency') {
+            options.mediaConcurrency = Number.parseInt(argv[++i], 10);
         } else if (arg === '--page-size') {
             options.pageSize = Number.parseInt(argv[++i], 10);
         } else {
@@ -43,30 +54,28 @@ function parseArgs(argv) {
         throw new Error('--page-size must be a positive integer.');
     }
 
+    if (!Number.isInteger(options.mediaConcurrency) || options.mediaConcurrency < 1) {
+        throw new Error('--media-concurrency must be a positive integer.');
+    }
+
     return options;
 }
 
-/**
- * Prints CLI usage information.
- *
- * @returns {void}
- */
 function printHelp() {
     console.log(`Usage: npm start -- [options]
 
 Options:
   --db <path>               SQLite database path. Default: database/database.db
   --storage-state <path>    Playwright storage state path. Default: teams-state.json
+  --download-media          Download Teams-hosted media while exporting
+  --no-download-media       Disable media downloads even when TEAMS_DOWNLOAD_MEDIA=true
+  --media-dir <path>        Media output directory. Default: media or TEAMS_MEDIA_DIR
+  --media-concurrency <n>   Simultaneous media downloads. Default: 4
   --page-size <number>      Chat selector page size. Default: 10
   --help                    Show this help text
 `);
 }
 
-/**
- * Runs the Teams exporter from authentication through selected chat export.
- *
- * @returns {Promise<void>} Resolves when the export finishes.
- */
 async function main() {
     const options = parseArgs(process.argv.slice(2));
 
@@ -77,6 +86,7 @@ async function main() {
 
     Logger.header('Teams Exporter');
     Logger.info(`Database: ${chalk.white(options.dbPath)}`);
+    Logger.info(`Media downloads: ${chalk.white(options.downloadMedia ? `enabled (${options.mediaDir})` : 'disabled')}`);
 
     const database = openTeamsDatabase(options.dbPath);
 
@@ -106,6 +116,9 @@ async function main() {
         await exportSelectedChats({
             api,
             database,
+            downloadMedia: options.downloadMedia,
+            mediaConcurrency: options.mediaConcurrency,
+            mediaDir: options.mediaDir,
             mode,
             selectedChats,
         });

@@ -57,6 +57,30 @@ CREATE TABLE IF NOT EXISTS message_reactions (
         ON DELETE CASCADE
 );
 
+-- Media references extracted from Teams messages and their local downloads.
+CREATE TABLE IF NOT EXISTS message_media (
+    conversation_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    media_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    url TEXT NOT NULL,
+    original_filename TEXT,
+    content_type TEXT,
+    byte_size INTEGER,
+    local_path TEXT,
+    download_status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        download_status IN ('pending', 'downloaded', 'failed')
+    ),
+    error TEXT,
+    raw_json TEXT,
+    downloaded_at TEXT,
+    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (conversation_id, message_id, media_id, url),
+    FOREIGN KEY (conversation_id, message_id)
+        REFERENCES messages(conversation_id, id)
+        ON DELETE CASCADE
+);
+
 -- Stores the latest sync-state URL per conversation for incremental backups.
 CREATE TABLE IF NOT EXISTS conversation_sync_state (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -128,6 +152,12 @@ ON messages(sender_id);
 
 CREATE INDEX IF NOT EXISTS idx_message_reactions_message
 ON message_reactions(conversation_id, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_message_media_status
+ON message_media(download_status);
+
+CREATE INDEX IF NOT EXISTS idx_message_media_message
+ON message_media(conversation_id, message_id);
 
 CREATE INDEX IF NOT EXISTS idx_conversation_sync_state_updated
 ON conversation_sync_state(updated_at);

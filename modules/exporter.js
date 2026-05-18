@@ -1,26 +1,16 @@
 import chalk from 'chalk';
+import { defaultMediaDir } from './config.js';
 import { buildMessagesUrl } from './teams-api.js';
+import { downloadMediaForMessages } from './media.js';
 import { ProgressTui } from './tui.js';
 import { sleep } from './utils.js';
 
 const pageDelayMs = 2000;
 
-/**
- * Returns the display name for a chat-like object.
- *
- * @param {object} chat - Teams chat-like payload.
- * @returns {string} Human-readable chat name.
- */
 function getChatName(chat) {
     return chat.name ?? chat.displayName ?? chat.title ?? chat.id;
 }
 
-/**
- * Returns the best estimated message total for a chat.
- *
- * @param {object} chat - Teams chat-like payload.
- * @returns {number | null} Estimated total from lastMessage.sequenceId, when available.
- */
 function getEstimatedTotalMessages(chat) {
     const estimate = chat.estimatedTotalMessages ?? chat.lastMessage?.sequenceId ?? chat.sourceChat?.lastMessage?.sequenceId;
 
@@ -73,26 +63,57 @@ function getBackwardLink(messagesData) {
     return metadata.backwardLink ?? metadata.backwardsLink ?? metadata.prevLink ?? null;
 }
 
-/**
- * Reads the sync-state URL from a Teams messages response.
- *
- * @param {object} messagesData - Teams messages payload.
- * @returns {string | null} Sync-state URL, when present.
- */
 function getSyncStateUrl(messagesData) {
     return messagesData._metadata?.syncState ?? null;
 }
 
-/**
- * Stores sync-state URL for a conversation when one is present.
- *
- * @param {import('./database.js').TeamsDatabase} database - Teams database wrapper.
- * @param {string} conversationId - Conversation ID.
- * @param {object} messagesData - Teams messages payload.
- * @returns {void}
- */
 function persistSyncStateFromPage(database, conversationId, messagesData) {
     database.setConversationSyncStateUrl(conversationId, getSyncStateUrl(messagesData));
+}
+
+/**
+ * Saves messages and optionally downloads Teams-hosted media referenced by them.
+ *
+ * @param {object} options - Save options.
+ * @param {object} options.api - Teams API client.
+ * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
+ * @param {string} options.mediaDir - Media output directory.
+ * @param {number | undefined} options.mediaConcurrency - Maximum simultaneous media downloads.
+ * @param {string} options.chatId - Chat ID.
+ * @param {string} options.chatName - Chat display name.
+ * @param {Array<object>} options.messages - Teams messages.
+ * @param {ProgressTui} options.tui - Live progress UI.
+ * @returns {Promise<void>} Resolves after persistence work finishes.
+ */
+async function saveMessagesPage({ api, database, downloadMedia, mediaConcurrency, mediaDir, chatId, chatName, messages, tui }) {
+    if (messages.length === 0) {
+        return;
+    }
+
+    database.saveMessages(chatId, messages);
+    tui.incrementMessages(messages.length);
+
+    if (!downloadMedia) {
+        return;
+    }
+
+    const mediaTotals = await downloadMediaForMessages({
+        api,
+        concurrency: mediaConcurrency,
+        conversationId: chatId,
+        conversationName: chatName,
+        database,
+        mediaDir,
+        messages,
+    });
+
+    if (mediaTotals.downloaded > 0 || mediaTotals.failed > 0) {
+        tui.addNote(
+            `${chalk.blue('media')} ${chatName}: ${mediaTotals.downloaded} item(s) downloaded`
+            + (mediaTotals.failed > 0 ? `, ${mediaTotals.failed} failed` : ''),
+        );
+    }
 }
 
 /**
@@ -141,12 +162,14 @@ function calculateTuiTotals(selectedChats, database, mode) {
  * @param {object} options - Export options.
  * @param {object} options.api - Teams API client.
  * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
  * @param {string} options.chatId - Chat ID.
  * @param {string} options.chatName - Display chat name.
+ * @param {string} options.mediaDir - Media output directory.
  * @param {ProgressTui} options.tui - Live progress UI.
  * @returns {Promise<void>} Resolves when export finishes.
  */
-async function exportHistorical({ api, database, chatId, chatName, tui }) {
+async function exportHistorical({ api, database, downloadMedia, chatId, chatName, mediaConcurrency, mediaDir, tui }) {
     let nextUrl = buildMessagesUrl(chatId);
     const seenUrls = new Set();
 
@@ -163,10 +186,7 @@ async function exportHistorical({ api, database, chatId, chatName, tui }) {
 
         persistSyncStateFromPage(database, chatId, messagesData);
 
-        if (messages.length > 0) {
-            database.saveMessages(chatId, messages);
-            tui.incrementMessages(messages.length);
-        }
+        await saveMessagesPage({ api, database, downloadMedia, mediaConcurrency, mediaDir, chatId, chatName, messages, tui });
 
         if (messages.length === 0) {
             break;
@@ -188,12 +208,14 @@ async function exportHistorical({ api, database, chatId, chatName, tui }) {
  * @param {object} options - Export options.
  * @param {object} options.api - Teams API client.
  * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
  * @param {string} options.chatId - Chat ID.
  * @param {string} options.chatName - Display chat name.
+ * @param {string} options.mediaDir - Media output directory.
  * @param {ProgressTui} options.tui - Live progress UI.
  * @returns {Promise<void>} Resolves when export finishes.
  */
-async function exportFromSyncState({ api, database, chatId, chatName, tui }) {
+async function exportFromSyncState({ api, database, downloadMedia, chatId, chatName, mediaConcurrency, mediaDir, tui }) {
     let nextUrl = database.getConversationSyncStateUrl(chatId);
 
     if (!nextUrl) {
@@ -217,10 +239,7 @@ async function exportFromSyncState({ api, database, chatId, chatName, tui }) {
 
         persistSyncStateFromPage(database, chatId, messagesData);
 
-        if (messages.length > 0) {
-            database.saveMessages(chatId, messages);
-            tui.incrementMessages(messages.length);
-        }
+        await saveMessagesPage({ api, database, downloadMedia, mediaConcurrency, mediaDir, chatId, chatName, messages, tui });
 
         if (messages.length === 0) {
             break;
@@ -242,12 +261,14 @@ async function exportFromSyncState({ api, database, chatId, chatName, tui }) {
  * @param {object} options - Export options.
  * @param {object} options.api - Teams API client.
  * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
  * @param {string} options.chatId - Chat ID.
  * @param {string} options.chatName - Display chat name.
+ * @param {string} options.mediaDir - Media output directory.
  * @param {ProgressTui} options.tui - Live progress UI.
  * @returns {Promise<void>} Resolves when export finishes.
  */
-async function exportRecentUntilSaved({ api, database, chatId, chatName, tui }) {
+async function exportRecentUntilSaved({ api, database, downloadMedia, chatId, chatName, mediaConcurrency, mediaDir, tui }) {
     let nextUrl = buildMessagesUrl(chatId);
     const seenUrls = new Set();
 
@@ -282,10 +303,7 @@ async function exportRecentUntilSaved({ api, database, chatId, chatName, tui }) 
             unsavedMessages.push(message);
         }
 
-        if (unsavedMessages.length > 0) {
-            database.saveMessages(chatId, unsavedMessages);
-            tui.incrementMessages(unsavedMessages.length);
-        }
+        await saveMessagesPage({ api, database, downloadMedia, mediaConcurrency, mediaDir, chatId, chatName, messages: unsavedMessages, tui });
 
         if (reachedSavedMessage) {
             break;
@@ -309,12 +327,14 @@ async function exportRecentUntilSaved({ api, database, chatId, chatName, tui }) 
  * @param {number} options.chatCount - Total selected chats.
  * @param {number} options.chatIndex - 1-based selected chat index.
  * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
  * @param {'resume' | 'backup-new' | 'backup-recent' | 'fresh'} options.mode - Export mode.
+ * @param {string} options.mediaDir - Media output directory.
  * @param {object} options.chat - Selected chat payload.
  * @param {ProgressTui} options.tui - Live progress UI.
  * @returns {Promise<void>} Resolves when the chat export finishes.
  */
-async function exportChat({ api, chat, chatCount, chatIndex, database, mode, tui }) {
+async function exportChat({ api, chat, chatCount, chatIndex, database, downloadMedia, mediaConcurrency, mode, mediaDir, tui }) {
     const chatName = getChatName(chat);
     const hasSavedSyncState = Boolean(database.getConversationSyncStateUrl(chat.id));
     const chatProgressSeed = getChatProgressSeed({
@@ -333,17 +353,17 @@ async function exportChat({ api, chat, chatCount, chatIndex, database, mode, tui
     });
 
     if (mode === 'backup-new') {
-        await exportFromSyncState({ api, database, chatId: chat.id, chatName, tui });
+        await exportFromSyncState({ api, database, downloadMedia, chatId: chat.id, chatName, mediaConcurrency, mediaDir, tui });
         return;
     }
 
     if (mode === 'backup-recent') {
-        await exportRecentUntilSaved({ api, database, chatId: chat.id, chatName, tui });
+        await exportRecentUntilSaved({ api, database, downloadMedia, chatId: chat.id, chatName, mediaConcurrency, mediaDir, tui });
         return;
     }
 
     if (mode === 'resume' && hasSavedSyncState) {
-        await exportFromSyncState({ api, database, chatId: chat.id, chatName, tui });
+        await exportFromSyncState({ api, database, downloadMedia, chatId: chat.id, chatName, mediaConcurrency, mediaDir, tui });
         return;
     }
 
@@ -351,7 +371,7 @@ async function exportChat({ api, chat, chatCount, chatIndex, database, mode, tui
         tui.addNote(`${chalk.blue('resume')} ${chatName}: no saved sync state, running full historical export`);
     }
 
-    await exportHistorical({ api, database, chatId: chat.id, chatName, tui });
+    await exportHistorical({ api, database, downloadMedia, chatId: chat.id, chatName, mediaConcurrency, mediaDir, tui });
 }
 
 /**
@@ -360,11 +380,21 @@ async function exportChat({ api, chat, chatCount, chatIndex, database, mode, tui
  * @param {object} options - Export options.
  * @param {object} options.api - Teams API client.
  * @param {import('./database.js').TeamsDatabase} options.database - Teams database wrapper.
+ * @param {boolean} options.downloadMedia - Whether media download is enabled.
+ * @param {string} options.mediaDir - Media output directory.
  * @param {'resume' | 'backup-new' | 'backup-recent' | 'fresh'} options.mode - Export mode.
  * @param {Array<object>} options.selectedChats - Chats selected by the user.
  * @returns {Promise<void>} Resolves when all selected chats finish exporting.
  */
-export async function exportSelectedChats({ api, database, mode, selectedChats }) {
+export async function exportSelectedChats({
+    api,
+    database,
+    downloadMedia = false,
+    mediaConcurrency,
+    mediaDir = defaultMediaDir,
+    mode,
+    selectedChats,
+}) {
     const totals = calculateTuiTotals(selectedChats, database, mode);
 
     let title = 'Exporting Teams Messages';
@@ -392,6 +422,9 @@ export async function exportSelectedChats({ api, database, mode, selectedChats }
                 chatCount: selectedChats.length,
                 chatIndex: i + 1,
                 database,
+                downloadMedia,
+                mediaConcurrency,
+                mediaDir,
                 mode,
                 tui,
             });

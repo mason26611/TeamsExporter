@@ -1,49 +1,65 @@
 import fs from 'node:fs';
-import { chromium } from 'playwright';
-import { meUrl, messageRequestPrefix, profileUrl, teamsBaseUrl } from './config.js';
+import { chromium, firefox, webkit } from 'playwright';
+import {
+    meUrl,
+    messageRequestPrefix,
+    playwrightBrowserName,
+    playwrightChannel,
+    playwrightHeadless,
+    profileUrl,
+    teamsBaseUrl,
+} from './config.js';
 
 const meEndpoint = meUrl.split('?')[0];
 const profileEndpoint = profileUrl.split('?')[0];
+const browserTypes = {
+    chromium,
+    firefox,
+    webkit,
+};
 
-/**
- * Checks whether a request URL is a Teams API URL that can carry a reusable auth token.
- *
- * @param {string} requestUrl - Request URL from Playwright.
- * @returns {boolean} True when the URL belongs to the Teams cloud API.
- */
+function getConfiguredBrowserType() {
+    const browserType = browserTypes[playwrightBrowserName];
+
+    if (!browserType) {
+        throw new Error(`Unsupported PLAYWRIGHT_BROWSER "${playwrightBrowserName}". Use chromium, firefox, or webkit.`);
+    }
+
+    return browserType;
+}
+
+function getLaunchOptions() {
+    const options = {
+        headless: playwrightHeadless,
+    };
+
+    if (playwrightChannel) {
+        if (playwrightBrowserName !== 'chromium') {
+            throw new Error('PLAYWRIGHT_CHANNEL is only supported when PLAYWRIGHT_BROWSER=chromium.');
+        }
+
+        options.channel = playwrightChannel;
+    }
+
+    return options;
+}
+
 function isTeamsApiRequest(requestUrl) {
     return requestUrl.startsWith(`${teamsBaseUrl}/api/`);
 }
 
-/**
- * Extracts the authorization header from a Playwright request.
- *
- * @param {import('playwright').Request} request - Playwright request object.
- * @returns {string | null} Authorization header, when present.
- */
 function getAuthorizationHeader(request) {
     return request.headers().authorization ?? null;
 }
 
-/**
- * Determines whether all required Teams tokens have been captured.
- *
- * @param {{me: string | null, messages: string | null, primary: string | null}} tokens - Current token state.
- * @returns {boolean} True when enough tokens are available to use the API.
- */
 function hasRequiredTokens(tokens) {
     return Boolean(tokens.me && tokens.messages && (tokens.primary || tokens.me));
 }
 
-/**
- * Captures Teams authorization tokens by opening a real Teams browser session.
- *
- * @param {{storageStatePath: string, onStatus?: (message: string) => void}} options - Capture options.
- * @returns {Promise<{me: string, messages: string, primary: string}>} Captured authorization tokens.
- */
 export async function captureTeamsAuth({ storageStatePath, onStatus = () => {} }) {
     const storageStateExists = fs.existsSync(storageStatePath);
-    const browser = await chromium.launch({ headless: false });
+    const browserType = getConfiguredBrowserType();
+    const browser = await browserType.launch(getLaunchOptions());
     const context = await browser.newContext({
         storageState: storageStateExists ? storageStatePath : undefined,
     });
@@ -54,7 +70,11 @@ export async function captureTeamsAuth({ storageStatePath, onStatus = () => {} }
         primary: null,
     };
 
-    onStatus(storageStateExists ? 'Reusing saved Teams browser session...' : 'Opening Teams so you can sign in...');
+    onStatus(
+        storageStateExists
+            ? `Reusing saved Teams browser session in ${playwrightBrowserName}...`
+            : `Opening Teams in ${playwrightBrowserName} so you can sign in...`,
+    );
 
     try {
         const capturedTokens = await new Promise((resolve, reject) => {
@@ -62,12 +82,6 @@ export async function captureTeamsAuth({ storageStatePath, onStatus = () => {} }
                 reject(new Error('Timed out waiting for Teams auth tokens. Sign in to Teams and let the page finish loading, then try again.'));
             }, 180000);
 
-            /**
-             * Stores useful authorization tokens from a Teams request.
-             *
-             * @param {import('playwright').Request} request - Playwright request object.
-             * @returns {void}
-             */
             function onRequest(request) {
                 const requestUrl = request.url();
                 const authorization = getAuthorizationHeader(request);
@@ -108,7 +122,6 @@ export async function captureTeamsAuth({ storageStatePath, onStatus = () => {} }
         await context.storageState({ path: storageStatePath });
         onStatus('Teams auth tokens captured and browser session saved.');
 
-        console.log(capturedTokens);
         return capturedTokens;
     } finally {
         await browser.close();
