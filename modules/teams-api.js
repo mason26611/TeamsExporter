@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { request as playwrightRequest } from 'playwright';
 import { initialMessagesUrl, meUrl, playwrightChannel, playwrightHeadless, profileUrl } from './config.js';
+import { sleep } from './utils.js';
 
 let cookieRequestContext = null;
 let cookieRequestContextPath = null;
@@ -13,6 +14,46 @@ let browserContextPath = null;
 
 export function buildMessagesUrl(chatId) {
     return initialMessagesUrl.replace('IDHERE', chatId);
+}
+
+const transientFetchErrorPattern = /terminated|fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|network error|aborted/i;
+
+function isTransientFetchError(error) {
+    if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+            return false;
+        }
+
+        if (transientFetchErrorPattern.test(error.message)) {
+            return true;
+        }
+
+        const { cause } = error;
+
+        return cause instanceof Error && transientFetchErrorPattern.test(cause.message);
+    }
+
+    return transientFetchErrorPattern.test(String(error));
+}
+
+async function withFetchRetry(operation, { retries = 3, baseDelayMs = 1000 } = {}) {
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+
+            if (attempt >= retries || !isTransientFetchError(error)) {
+                throw error;
+            }
+
+            await sleep(baseDelayMs * (attempt + 1));
+        }
+    }
+
+    throw lastError ?? new Error('Teams API request failed after retries.');
 }
 
 async function readJsonResponse(response) {
@@ -27,35 +68,39 @@ async function readJsonResponse(response) {
 }
 
 async function requestJson(url, { authorization, body, method = 'GET' }) {
-    const response = await fetch(url, {
-        body: body === undefined ? undefined : JSON.stringify(body),
-        headers: {
-            authorization,
-            ...(body === undefined ? {} : { 'content-type': 'application/json;charset=UTF-8' }),
-        },
-        method,
-    });
+    return withFetchRetry(async () => {
+        const response = await fetch(url, {
+            body: body === undefined ? undefined : JSON.stringify(body),
+            headers: {
+                authorization,
+                ...(body === undefined ? {} : { 'content-type': 'application/json;charset=UTF-8' }),
+            },
+            method,
+        });
 
-    return readJsonResponse(response);
+        return readJsonResponse(response);
+    });
 }
 
 async function requestBinary(url, { authorization }) {
-    const response = await fetch(url, {
-        headers: {
-            authorization,
-        },
+    return withFetchRetry(async () => {
+        const response = await fetch(url, {
+            headers: {
+                authorization,
+            },
+        });
+
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Teams media request failed (${response.status}): ${text.slice(0, 500)}`);
+        }
+
+        return {
+            buffer: Buffer.from(await response.arrayBuffer()),
+            contentType: response.headers.get('content-type'),
+            finalUrl: response.url,
+        };
     });
-
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Teams media request failed (${response.status}): ${text.slice(0, 500)}`);
-    }
-
-    return {
-        buffer: Buffer.from(await response.arrayBuffer()),
-        contentType: response.headers.get('content-type'),
-        finalUrl: response.url,
-    };
 }
 
 function needsCookieAuth(url) {
@@ -145,7 +190,11 @@ async function resetCookieRequestContext() {
 
 async function getBrowserContext(storageStatePath) {
     if (!browser) {
-        browser = await chromium.launch(getBrowserLaunchOptions());
+        // Media fallback runs headless so SharePoint attachment downloads do not pop up a browser window.
+        browser = await chromium.launch({
+            ...getBrowserLaunchOptions(),
+            headless: true,
+        });
     }
 
     if (!browserContext || browserContextPath !== storageStatePath) {
@@ -168,19 +217,25 @@ async function requestBinaryWithBrowser(url, storageStatePath) {
     const page = await context.newPage();
 
     try {
-        const downloadPromise = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
-        const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-        const responseContentType = response?.headers()['content-type'] ?? null;
+        const downloadPromise = page.waitForEvent('download', { timeout: 15000 })
+            .then((download) => ({ download }))
+            .catch(() => ({ download: null }));
+        const navigationPromise = page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+            .then((response) => ({ response }))
+            .catch((error) => ({ error }));
+        const firstResult = await Promise.race([downloadPromise, navigationPromise]);
+        let download = firstResult.download ?? null;
 
-        if (responseContentType?.toLowerCase().includes('text/html')) {
-            const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
-
-            if (hasSharePointAccessDeniedText(bodyText)) {
-                throw new Error(`SharePoint access denied: ${sharePointAccessDeniedText}`);
-            }
+        if (!download && firstResult.error) {
+            download = (await downloadPromise).download;
+        } else if (!download && firstResult.response) {
+            download = (await Promise.race([
+                downloadPromise,
+                new Promise((resolve) => {
+                    setTimeout(() => resolve({ download: null }), 250);
+                }),
+            ])).download;
         }
-
-        const download = await downloadPromise;
 
         if (download) {
             const tempPath = path.join(os.tmpdir(), `teams-exporter-${Date.now()}-${download.suggestedFilename()}`);
@@ -195,6 +250,23 @@ async function requestBinaryWithBrowser(url, storageStatePath) {
                 contentType: null,
                 finalUrl: page.url(),
             };
+        }
+
+        const response = firstResult.response ?? null;
+        const navigationError = firstResult.error ?? null;
+
+        if (navigationError) {
+            throw navigationError;
+        }
+
+        const responseContentType = response?.headers()['content-type'] ?? null;
+
+        if (responseContentType?.toLowerCase().includes('text/html')) {
+            const bodyText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
+
+            if (hasSharePointAccessDeniedText(bodyText)) {
+                throw new Error(`SharePoint access denied: ${sharePointAccessDeniedText}`);
+            }
         }
 
         if (!response?.ok()) {
