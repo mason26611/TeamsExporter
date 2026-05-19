@@ -16,7 +16,7 @@ function readBooleanEnv(name, defaultValue) {
 export const defaultDbPath = path.resolve('database', 'database.db');
 export const defaultMediaDir = path.resolve(process.env.TEAMS_MEDIA_DIR || 'media');
 export const defaultStorageStatePath = path.resolve('teams-state.json');
-export const downloadMediaByDefault = readBooleanEnv('TEAMS_DOWNLOAD_MEDIA', false);
+export const downloadMediaByDefault = readBooleanEnv('TEAMS_DOWNLOAD_MEDIA', true);
 export const playwrightBrowserName = (process.env.PLAYWRIGHT_BROWSER || 'chromium').toLowerCase();
 export const playwrightChannel = process.env.PLAYWRIGHT_CHANNEL || null;
 export const playwrightHeadless = readBooleanEnv('PLAYWRIGHT_HEADLESS', false);

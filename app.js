@@ -2,6 +2,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 import { selectBackupMode } from './modules/backup-mode-selector.js';
 import { selectChats } from './modules/chat-selector.js';
+import { selectMediaDownload } from './modules/media-download-selector.js';
 import { defaultDbPath, defaultMediaDir, defaultStorageStatePath, downloadMediaByDefault } from './modules/config.js';
 import { openTeamsDatabase } from './modules/database.js';
 import { exportSelectedChats } from './modules/exporter.js';
@@ -67,8 +68,8 @@ function printHelp() {
 Options:
   --db <path>               SQLite database path. Default: database/database.db
   --storage-state <path>    Playwright storage state path. Default: teams-state.json
-  --download-media          Download Teams-hosted media while exporting
-  --no-download-media       Disable media downloads even when TEAMS_DOWNLOAD_MEDIA=true
+  --download-media          Default the media download prompt to Yes
+  --no-download-media       Default the media download prompt to No
   --media-dir <path>        Media output directory. Default: media or TEAMS_MEDIA_DIR
   --media-concurrency <n>   Simultaneous media downloads. Default: 4
   --page-size <number>      Chat selector page size. Default: 10
@@ -86,7 +87,6 @@ async function main() {
 
     Logger.header('Teams Exporter');
     Logger.info(`Database: ${chalk.white(options.dbPath)}`);
-    Logger.info(`Media downloads: ${chalk.white(options.downloadMedia ? `enabled (${options.mediaDir})` : 'disabled')}`);
 
     const database = openTeamsDatabase(options.dbPath);
     let api = null;
@@ -114,10 +114,13 @@ async function main() {
         const mode = await selectBackupMode();
         Logger.info(`Mode: ${chalk.white(mode)}`);
 
+        const downloadMedia = await selectMediaDownload(options.downloadMedia);
+        Logger.info(`Media downloads: ${chalk.white(downloadMedia ? `enabled (${options.mediaDir})` : 'disabled')}`);
+
         await exportSelectedChats({
             api,
             database,
-            downloadMedia: options.downloadMedia,
+            downloadMedia,
             mediaConcurrency: options.mediaConcurrency,
             mediaDir: options.mediaDir,
             mode,

@@ -334,6 +334,7 @@ export class TeamsDatabase {
             ORDER BY messages.conversation_id, COALESCE(messages.sequence_id, 0), messages.id
             LIMIT ? OFFSET ?
         `);
+        this.getTotalMessageCountForMediaDownloadStatement = database.prepare('SELECT COUNT(*) AS count FROM messages');
 
         this.getMaxSequenceStatement = database.prepare('SELECT MAX(sequence_id) AS maxSequence FROM messages WHERE conversation_id = ?');
         this.getConversationSyncStateStatement = database.prepare('SELECT sync_state_url FROM conversation_sync_state WHERE conversation_id = ?');
@@ -481,6 +482,10 @@ export class TeamsDatabase {
 
     getMessagesForMediaDownloadBatch(limit, offset) {
         return this.getMessagesForMediaDownloadBatchStatement.all(limit, offset);
+    }
+
+    getTotalMessageCountForMediaDownload() {
+        return this.getTotalMessageCountForMediaDownloadStatement.get()?.count ?? 0;
     }
 
     hasMessage(conversationId, messageId) {

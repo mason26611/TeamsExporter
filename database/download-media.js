@@ -7,6 +7,7 @@ import { downloadMediaForMessages } from '../modules/media.js';
 import { Logger } from '../modules/logger.js';
 import { createTeamsApi } from '../modules/teams-api.js';
 import { captureTeamsAuth } from '../modules/teams-auth.js';
+import { MediaProgressTui } from '../modules/tui.js';
 import { gunzipJson } from '../modules/utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +102,10 @@ async function main() {
             onStatus: Logger.info,
         });
         api = createTeamsApi(auth);
+        const totalAvailableMessages = database.getTotalMessageCountForMediaDownload();
+        const totalMessages = options.limit === null
+            ? totalAvailableMessages
+            : Math.min(options.limit, totalAvailableMessages);
         const totals = {
             discovered: 0,
             downloaded: 0,
@@ -108,65 +113,78 @@ async function main() {
             scanned: 0,
             skipped: 0,
         };
+        const tui = new MediaProgressTui({
+            title: 'Downloading Teams Media',
+            totalMessages,
+        });
 
-        for (let offset = 0; ; offset += messageBatchSize) {
-            const remaining = options.limit === null ? messageBatchSize : options.limit - totals.scanned;
+        tui.start();
 
-            if (remaining <= 0) {
-                break;
-            }
+        try {
+            for (let offset = 0; ; offset += messageBatchSize) {
+                const remaining = options.limit === null ? messageBatchSize : options.limit - totals.scanned;
 
-            const rows = database.getMessagesForMediaDownloadBatch(
-                Math.min(messageBatchSize, remaining),
-                offset,
-            );
+                if (remaining <= 0) {
+                    break;
+                }
 
-            if (rows.length === 0) {
-                break;
-            }
+                const rows = database.getMessagesForMediaDownloadBatch(
+                    Math.min(messageBatchSize, remaining),
+                    offset,
+                );
 
-            const rowsByConversation = new Map();
+                if (rows.length === 0) {
+                    break;
+                }
 
-            for (const row of rows) {
-                const key = row.conversation_id;
-                const existing = rowsByConversation.get(key);
+                const rowsByConversation = new Map();
 
-                if (existing) {
-                    existing.rows.push(row);
-                } else {
-                    rowsByConversation.set(key, {
-                        conversationId: row.conversation_id,
-                        conversationName: row.conversation_name,
-                        rows: [row],
+                for (const row of rows) {
+                    const key = row.conversation_id;
+                    const existing = rowsByConversation.get(key);
+
+                    if (existing) {
+                        existing.rows.push(row);
+                    } else {
+                        rowsByConversation.set(key, {
+                            conversationId: row.conversation_id,
+                            conversationName: row.conversation_name,
+                            rows: [row],
+                        });
+                    }
+                }
+
+                for (const group of rowsByConversation.values()) {
+                    const conversationName = group.conversationName ?? group.conversationId;
+                    const messages = group.rows.map((row) => gunzipJson(row.raw_zlib));
+
+                    tui.setConversation(conversationName);
+
+                    const result = await downloadMediaForMessages({
+                        api,
+                        concurrency: options.mediaConcurrency,
+                        conversationId: group.conversationId,
+                        conversationName: group.conversationName,
+                        database,
+                        mediaDir: options.mediaDir,
+                        messages,
+                        onProgress: (event) => tui.incrementMedia(event.type, event.count),
                     });
+
+                    totals.scanned += group.rows.length;
+                    tui.incrementMessages(group.rows.length);
+                    addTotals(totals, result);
+
+                    if (result.downloaded > 0 || result.failed > 0) {
+                        tui.addNote(
+                            `${conversationName}: ${result.downloaded} downloaded`
+                            + (result.failed > 0 ? `, ${result.failed} failed` : ''),
+                        );
+                    }
                 }
             }
-
-            for (const group of rowsByConversation.values()) {
-                const messages = group.rows.map((row) => gunzipJson(row.raw_zlib));
-                const result = await downloadMediaForMessages({
-                    api,
-                    concurrency: options.mediaConcurrency,
-                    conversationId: group.conversationId,
-                    conversationName: group.conversationName,
-                    database,
-                    mediaDir: options.mediaDir,
-                    messages,
-                });
-
-                totals.scanned += group.rows.length;
-                addTotals(totals, result);
-
-                if (result.downloaded > 0 || result.failed > 0) {
-                    Logger.info(
-                        `${group.conversationName ?? group.conversationId}: ${result.downloaded} downloaded`
-                        + (result.failed > 0 ? `, ${result.failed} failed` : ''),
-                    );
-                } else if (totals.scanned % 500 === 0) {
-                    Logger.info(`Scanned ${totals.scanned} messages...`);
-                }
-            }
-
+        } finally {
+            tui.stop();
         }
 
         Logger.success(

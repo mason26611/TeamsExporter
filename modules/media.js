@@ -485,6 +485,12 @@ async function runWithConcurrency(items, concurrency, worker) {
     await Promise.all(workers);
 }
 
+function reportDownloadProgress(onProgress, type, count = 1) {
+    if (onProgress && count > 0) {
+        onProgress({ count, type });
+    }
+}
+
 /**
  * Downloads media for Teams messages and records the result in SQLite.
  *
@@ -496,6 +502,7 @@ async function runWithConcurrency(items, concurrency, worker) {
  * @param {number} [options.concurrency] - Maximum simultaneous media downloads.
  * @param {string} options.mediaDir - Output directory.
  * @param {Array<object>} options.messages - Teams message payloads.
+ * @param {(event: {type: 'discovered' | 'downloaded' | 'failed' | 'skipped', count: number}) => void} [options.onProgress] - Progress callback.
  * @returns {Promise<{discovered: number, downloaded: number, failed: number, skipped: number}>} Download totals.
  */
 export async function downloadMediaForMessages({
@@ -506,6 +513,7 @@ export async function downloadMediaForMessages({
     database,
     mediaDir,
     messages,
+    onProgress,
 }) {
     const totals = {
         discovered: 0,
@@ -519,6 +527,7 @@ export async function downloadMediaForMessages({
         const messageId = String(message.id);
         const mediaTargets = extractMediaFromMessage(message);
         totals.discovered += mediaTargets.length;
+        reportDownloadProgress(onProgress, 'discovered', mediaTargets.length);
 
         for (const media of mediaTargets) {
             database.upsertMessageMedia(conversationId, messageId, media);
@@ -532,6 +541,7 @@ export async function downloadMediaForMessages({
 
                 if (fs.existsSync(downloadedAbsolutePath) && !isCorruptDownloadedFile(downloadedAbsolutePath, media.extension)) {
                     totals.skipped += 1;
+                    reportDownloadProgress(onProgress, 'skipped');
                     continue;
                 }
 
@@ -553,6 +563,7 @@ export async function downloadMediaForMessages({
                 )
             ) {
                 totals.skipped += 1;
+                reportDownloadProgress(onProgress, 'skipped');
                 continue;
             }
 
@@ -573,6 +584,7 @@ export async function downloadMediaForMessages({
                     }
 
                     totals.skipped += 1;
+                    reportDownloadProgress(onProgress, 'skipped');
                     continue;
                 }
             }
@@ -599,6 +611,7 @@ export async function downloadMediaForMessages({
                     }
 
                     totals.skipped += 1;
+                    reportDownloadProgress(onProgress, 'skipped');
                     continue;
                 }
             }
@@ -662,9 +675,11 @@ export async function downloadMediaForMessages({
                 localPath: outputPath.relativePath,
             });
             totals.downloaded += 1;
+            reportDownloadProgress(onProgress, 'downloaded');
         } catch (error) {
             database.markMessageMediaFailed(conversationId, messageId, media, error);
             totals.failed += 1;
+            reportDownloadProgress(onProgress, 'failed');
         }
     });
 

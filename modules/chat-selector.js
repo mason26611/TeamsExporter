@@ -39,6 +39,7 @@ export async function selectChats(combinedChats, pageSize = 10) {
     const processedChats = normalizeSelectableChats(combinedChats);
     let cursor = 0;
     let page = 0;
+    let errorMessage = '';
     const selected = new Set();
     const totalPages = Math.max(1, Math.ceil(processedChats.length / pageSize));
 
@@ -57,8 +58,8 @@ export async function selectChats(combinedChats, pageSize = 10) {
     function render() {
         console.clear();
         console.log(chalk.bold.cyan('Select chats'));
-        console.log(chalk.dim('Up/Down move | Space select | Left/Right page | Enter confirm | Ctrl+C exit'));
-        console.log(`${chalk.blue('Page')} ${page + 1}/${totalPages} | ${chalk.green('Selected')} ${selected.size}\n`);
+        console.log(chalk.dim('Up/Down move | Space select | A select all | Left/Right page | Enter confirm | Ctrl+C exit'));
+        console.log(`${chalk.blue('Page')} ${page + 1}/${totalPages} | ${chalk.green('Selected')} ${selected.size}/${processedChats.length}`);
 
         const pageItems = getPageItems();
 
@@ -74,6 +75,10 @@ export async function selectChats(combinedChats, pageSize = 10) {
             const estimate = chat.estimatedTotalMessages ? chalk.dim(` ~${chat.estimatedTotalMessages} msgs`) : '';
 
             console.log(`${pointer} ${bubble} ${chat.name}${estimate}`);
+        }
+
+        if (errorMessage) {
+            console.log(`\n${chalk.red(errorMessage)}`);
         }
     }
 
@@ -117,12 +122,29 @@ export async function selectChats(combinedChats, pageSize = 10) {
                     } else {
                         selected.add(selectedIndex);
                     }
+
+                    errorMessage = '';
                 }
 
                 render();
             }
 
+            if (key.name === 'a') {
+                for (let i = 0; i < processedChats.length; i++) {
+                    selected.add(i);
+                }
+
+                errorMessage = '';
+                render();
+            }
+
             if (key.name === 'return') {
+                if (selected.size === 0) {
+                    errorMessage = 'Select at least one chat before continuing.';
+                    render();
+                    return;
+                }
+
                 process.stdin.off('keypress', onKeypress);
                 disableRawInput();
                 console.clear();

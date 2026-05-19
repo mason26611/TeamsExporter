@@ -23,6 +23,15 @@ function formatCount(current, total) {
     return `${current}/${total} messages (${percent}%)`;
 }
 
+function formatGenericCount(current, total, label) {
+    if (!total || total <= 0) {
+        return `${current} ${label}`;
+    }
+
+    const percent = Math.min(100, Math.round((current / total) * 100));
+    return `${current}/${total} ${label} (${percent}%)`;
+}
+
 export class ProgressTui {
     constructor({ title, totalMessages = null }) {
         this.title = title;
@@ -102,6 +111,97 @@ export class ProgressTui {
 
         if (!this.totalMessages) {
             console.log(chalk.yellow('Total message count is not exposed by the messages JSON; using discovered messages.'));
+        }
+
+        for (const note of this.notes) {
+            console.log(chalk.dim(note));
+        }
+    }
+}
+
+export class MediaProgressTui {
+    constructor({ title, totalMessages = null }) {
+        this.title = title;
+        this.totalMessages = totalMessages;
+        this.currentConversation = 'Waiting to start';
+        this.discoveredMedia = 0;
+        this.downloadedMedia = 0;
+        this.failedMedia = 0;
+        this.notes = [];
+        this.scannedMessages = 0;
+        this.skippedMedia = 0;
+        this.started = false;
+    }
+
+    start() {
+        this.started = true;
+        this.render();
+    }
+
+    stop() {
+        this.render();
+        this.started = false;
+        console.log('');
+    }
+
+    setConversation(conversationName) {
+        this.currentConversation = conversationName;
+        this.render();
+    }
+
+    incrementMessages(count) {
+        this.scannedMessages += count;
+        this.render();
+    }
+
+    incrementMedia(kind, count = 1) {
+        if (kind === 'discovered') {
+            this.discoveredMedia += count;
+        } else if (kind === 'downloaded') {
+            this.downloadedMedia += count;
+        } else if (kind === 'failed') {
+            this.failedMedia += count;
+        } else if (kind === 'skipped') {
+            this.skippedMedia += count;
+        }
+
+        this.render();
+    }
+
+    addNote(note) {
+        this.notes = [note, ...this.notes].slice(0, 4);
+        this.render();
+    }
+
+    render() {
+        if (!this.started && this.scannedMessages === 0) {
+            return;
+        }
+
+        if (process.stdout.isTTY) {
+            readline.cursorTo(process.stdout, 0, 0);
+            readline.clearScreenDown(process.stdout);
+        }
+
+        const scanBar = buildProgressBar(this.scannedMessages, this.totalMessages, 32);
+        const scanCount = formatGenericCount(this.scannedMessages, this.totalMessages, 'messages scanned');
+        const handledMedia = this.downloadedMedia + this.failedMedia + this.skippedMedia;
+        const mediaBar = buildProgressBar(handledMedia, this.discoveredMedia, 32);
+        const mediaCount = formatGenericCount(handledMedia, this.discoveredMedia, 'media handled');
+
+        console.log(chalk.bold.cyan(this.title));
+        console.log(`${chalk.blue('Scan')} ${scanBar} ${chalk.white(scanCount)}`);
+        console.log(`${chalk.blue('Media')} ${mediaBar} ${chalk.white(mediaCount)}`);
+        console.log(`${chalk.blue('Current')} ${chalk.white(this.currentConversation)}`);
+        console.log(
+            `${chalk.green('Downloaded')} ${this.downloadedMedia}`
+            + ` | ${chalk.yellow('Skipped')} ${this.skippedMedia}`
+            + ` | ${chalk.red('Failed')} ${this.failedMedia}`
+            + ` | ${chalk.blue('Found')} ${this.discoveredMedia}`,
+        );
+
+        if (!this.totalMessages) {
+            console.log(chalk.yellow('Total message count is unknown; using discovered messages.'));
         }
 
         for (const note of this.notes) {
