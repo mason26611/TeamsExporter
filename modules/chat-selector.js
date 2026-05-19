@@ -5,9 +5,14 @@ function normalizeSelectableChats(combinedChats) {
     const processedChats = [];
 
     for (const chat of combinedChats) {
-        const name = chat.displayName ?? chat.title;
+        if (!chat.id) {
+            continue;
+        }
 
-        if (!name || !chat.id) {
+        // Match exporter getChatName: team channels often omit displayName/title on /users/me chats.
+        const name = chat.name ?? chat.displayName ?? chat.title ?? String(chat.id);
+
+        if (!name) {
             continue;
         }
 
@@ -72,7 +77,7 @@ export async function selectChats(combinedChats, pageSize = 10) {
             const chat = pageItems[i];
             const pointer = i === cursor ? chalk.cyan('>') : ' ';
             const bubble = selected.has(chat.index) ? chalk.green('●') : chalk.dim('○');
-            const estimate = chat.estimatedTotalMessages ? chalk.dim(` ~${chat.estimatedTotalMessages} msgs`) : '';
+            const estimate = chat.estimatedTotalMessages ? chalk.dim(` ~${chat.estimatedTotalMessages} msgs`) : chalk.dim(` ~0 msgs`);
 
             console.log(`${pointer} ${bubble} ${chat.name}${estimate}`);
         }

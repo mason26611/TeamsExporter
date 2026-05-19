@@ -77,6 +77,58 @@ Options:
 `);
 }
 
+function getTeamChannelChats(teams) {
+    if (!Array.isArray(teams)) {
+        return [];
+    }
+
+    const channels = [];
+
+    for (const team of teams) {
+        const teamName = team.displayName ?? team.name ?? team.title ?? team.id ?? 'Team';
+
+        if (!Array.isArray(team.channels)) {
+            continue;
+        }
+
+        for (const channel of team.channels) {
+            if (!channel?.id) {
+                continue;
+            }
+
+            const channelName = channel.displayName ?? channel.name ?? channel.title ?? channel.id;
+            const displayName = `${teamName} / ${channelName}`;
+
+            channels.push({
+                ...channel,
+                displayName,
+                estimatedTotalMessages: channel.estimatedTotalMessages ?? channel.lastMessage?.sequenceId ?? null,
+                name: displayName,
+                sourceType: 'team-channel',
+                teamId: team.id,
+                teamName,
+                title: displayName,
+            });
+        }
+    }
+
+    return channels.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function hasUsableChatName(chat) {
+    return Boolean(chat.displayName ?? chat.title ?? chat.name);
+}
+
+function shouldKeepNonOneOnOneChat(chat, hasTeamChannels) {
+    if (hasUsableChatName(chat)) {
+        return true;
+    }
+
+    // Team channels are available as named `teams[].channels[]` entries from the same /users/me payload.
+    // Keeping unnamed chat rows alongside them only exposes raw thread ids in the picker.
+    return !hasTeamChannels;
+}
+
 async function main() {
     const options = parseArgs(process.argv.slice(2));
 
@@ -100,9 +152,20 @@ async function main() {
 
         Logger.info('Loading chat list from Teams...');
         const meData = await api.getMe();
-        const directMessageUsers = await api.getDirectMessageUsers(meData.chats ?? []);
-        const groupChats = getGroupChats(meData.chats ?? []);
-        const combinedChats = [...directMessageUsers.value, ...groupChats];
+        const chats = meData.chats ?? [];
+        const directMessageUsers = await api.getDirectMessageUsers(chats);
+        const groupChatsRaw = getGroupChats(chats);
+        const teamChannelChats = getTeamChannelChats(meData.teams ?? []);
+        const namedGroupChatsRaw = groupChatsRaw.filter((chat) => shouldKeepNonOneOnOneChat(chat, teamChannelChats.length > 0));
+        const combinedChatById = new Map();
+
+        for (const chat of [...directMessageUsers.value, ...teamChannelChats, ...namedGroupChatsRaw]) {
+            if (chat?.id && !combinedChatById.has(chat.id)) {
+                combinedChatById.set(chat.id, chat);
+            }
+        }
+
+        const combinedChats = [...combinedChatById.values()];
 
         const selectedChats = await selectChats(combinedChats, options.pageSize);
 

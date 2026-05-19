@@ -1,8 +1,8 @@
 {
-	"name": "teamsexporter",
-	"description": "",
+	"name": "teams-exporter",
+	"description": "A terminal application made for exporting Teams messages.",
 	"author": "Mason Gover",
-	"license": "",
+	"license": "MIT",
 	"type": "module",
 	"version": "1.0.0",
 	"main": "app.js",
