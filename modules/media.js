@@ -629,8 +629,9 @@ export async function downloadMediaForMessages({
             for (const downloadUrl of urlsToTry) {
                 try {
                     const candidate = await api.downloadMedia(downloadUrl);
+                    const candidateIsHtml = isHtmlPayload(candidate.buffer, candidate.contentType);
 
-                    if (isHtmlPayload(candidate.buffer, candidate.contentType)) {
+                    if (candidateIsHtml) {
                         lastError = new Error(`Teams media request returned HTML instead of file content (${downloadUrl})`);
                         continue;
                     }

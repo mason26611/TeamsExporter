@@ -110,8 +110,9 @@ async function requestBinaryWithCookies(url, storageStatePath) {
 
     const headers = response.headers();
     const buffer = Buffer.from(await response.body());
+    const isHtmlResponse = headers['content-type']?.toLowerCase().includes('text/html') ?? false;
 
-    if (headers['content-type']?.toLowerCase().includes('text/html')) {
+    if (isHtmlResponse) {
         return requestBinaryWithBrowser(url, storageStatePath);
     }
 
