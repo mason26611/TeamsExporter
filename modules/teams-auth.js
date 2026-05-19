@@ -111,6 +111,7 @@ export async function captureTeamsAuth({ storageStatePath, onStatus = () => {} }
                         me: tokens.me,
                         messages: tokens.messages,
                         primary: tokens.primary ?? tokens.me,
+                        storageStatePath,
                     });
                 }
             }

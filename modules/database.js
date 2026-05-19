@@ -241,6 +241,56 @@ export class TeamsDatabase {
             LIMIT 1
         `);
 
+        this.hasDownloadedMessageMediaStatement = database.prepare(`
+            SELECT 1
+            FROM message_media
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+                AND download_status = 'downloaded'
+            LIMIT 1
+        `);
+
+        this.getDownloadedMessageMediaStatement = database.prepare(`
+            SELECT local_path, content_type
+            FROM message_media
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+                AND download_status = 'downloaded'
+            LIMIT 1
+        `);
+
+        this.resetMessageMediaForRetryStatement = database.prepare(`
+            UPDATE message_media
+            SET
+                download_status = 'pending',
+                error = NULL,
+                local_path = NULL,
+                content_type = NULL,
+                byte_size = NULL,
+                downloaded_at = NULL
+            WHERE conversation_id = ?
+                AND message_id = ?
+                AND media_id = ?
+        `);
+
+        this.cleanupOrphanedMediaFailuresStatement = database.prepare(`
+            DELETE FROM message_media
+            WHERE download_status = 'failed'
+                AND (
+                    (error LIKE '%401%' AND url LIKE '%/Documents/%')
+                    OR EXISTS (
+                        SELECT 1
+                        FROM message_media AS sibling
+                        WHERE sibling.conversation_id = message_media.conversation_id
+                            AND sibling.message_id = message_media.message_id
+                            AND sibling.media_id = message_media.media_id
+                            AND sibling.download_status = 'downloaded'
+                    )
+                )
+        `);
+
         this.markMessageMediaDownloadedStatement = database.prepare(`
             UPDATE message_media
             SET
@@ -385,6 +435,22 @@ export class TeamsDatabase {
 
     getMessageMedia(conversationId, messageId, mediaId, url) {
         return this.getMessageMediaStatement.get(conversationId, String(messageId), mediaId, url);
+    }
+
+    hasDownloadedMessageMedia(conversationId, messageId, mediaId) {
+        return Boolean(this.hasDownloadedMessageMediaStatement.get(conversationId, String(messageId), mediaId));
+    }
+
+    getDownloadedMessageMedia(conversationId, messageId, mediaId) {
+        return this.getDownloadedMessageMediaStatement.get(conversationId, String(messageId), mediaId);
+    }
+
+    resetMessageMediaForRetry(conversationId, messageId, mediaId) {
+        this.resetMessageMediaForRetryStatement.run(conversationId, String(messageId), mediaId);
+    }
+
+    cleanupOrphanedMediaFailures() {
+        return this.cleanupOrphanedMediaFailuresStatement.run().changes;
     }
 
     markMessageMediaDownloaded(conversationId, messageId, media, result) {

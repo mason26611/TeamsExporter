@@ -89,13 +89,14 @@ async function main() {
     Logger.info(`Media downloads: ${chalk.white(options.downloadMedia ? `enabled (${options.mediaDir})` : 'disabled')}`);
 
     const database = openTeamsDatabase(options.dbPath);
+    let api = null;
 
     try {
         const auth = await captureTeamsAuth({
             storageStatePath: options.storageStatePath,
             onStatus: Logger.info,
         });
-        const api = createTeamsApi(auth);
+        api = createTeamsApi(auth);
 
         Logger.info('Loading chat list from Teams...');
         const meData = await api.getMe();
@@ -125,6 +126,10 @@ async function main() {
 
         Logger.success('Export complete.');
     } finally {
+        if (api) {
+            await api.close();
+        }
+
         database.close();
     }
 }

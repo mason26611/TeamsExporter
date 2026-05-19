@@ -88,13 +88,19 @@ async function main() {
     Logger.info(`Media directory: ${chalk.white(options.mediaDir)}`);
 
     const database = openTeamsDatabase(options.dbPath);
+    let api = null;
+    const cleanedOrphans = database.cleanupOrphanedMediaFailures();
+
+    if (cleanedOrphans > 0) {
+        Logger.info(`Removed ${cleanedOrphans} stale media failure record(s) from earlier URL strategies.`);
+    }
 
     try {
         const auth = await captureTeamsAuth({
             storageStatePath: options.storageStatePath,
             onStatus: Logger.info,
         });
-        const api = createTeamsApi(auth);
+        api = createTeamsApi(auth);
         const totals = {
             discovered: 0,
             downloaded: 0,
@@ -168,6 +174,10 @@ async function main() {
             + `downloaded ${totals.downloaded}, skipped ${totals.skipped}, failed ${totals.failed}.`,
         );
     } finally {
+        if (api) {
+            await api.close();
+        }
+
         database.close();
     }
 }

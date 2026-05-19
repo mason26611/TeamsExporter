@@ -93,8 +93,8 @@ function getAmsObjectIdFromUrl(url) {
     return match ? decodeURIComponent(match[1]) : null;
 }
 
-function buildAmsMediaUrl(objectId) {
-    return `${defaultAmsBaseUrl}/v1/objects/${encodeURIComponent(objectId)}/views/imgo`;
+function buildAmsMediaUrl(objectId, view = 'imgo') {
+    return `${defaultAmsBaseUrl}/v1/objects/${encodeURIComponent(objectId)}/views/${view}`;
 }
 
 function normalizeMediaExtension(extension) {
@@ -136,21 +136,196 @@ function firstString(...values) {
     return values.find((value) => typeof value === 'string' && value.trim()) ?? null;
 }
 
+function encodeSharePointSharingUrl(url) {
+    const base64 = Buffer.from(url, 'utf8').toString('base64');
+    const base64url = base64.replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+
+    return `u!${base64url}`;
+}
+
+function buildDriveRootContentUrl(fileUrl) {
+    const parsed = tryParseUrl(fileUrl);
+
+    if (!parsed?.pathname.includes('/personal/') || !parsed.pathname.includes('/Documents/')) {
+        return null;
+    }
+
+    const personalRoot = parsed.pathname.match(/^(\/personal\/[^/]+)/)?.[1];
+
+    if (!personalRoot) {
+        return null;
+    }
+
+    const filePath = decodeURIComponent(parsed.pathname.slice(`${personalRoot}/`.length));
+    const encodedPath = filePath.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+
+    return `${parsed.origin}${personalRoot}/_api/v2.0/drive/root:/${encodedPath}:/content`;
+}
+
+function buildGraphShareContentUrl(shareUrl) {
+    if (!shareUrl) {
+        return null;
+    }
+
+    try {
+        const encoded = encodeSharePointSharingUrl(shareUrl);
+
+        return `https://graph.microsoft.com/v1.0/shares/${encoded}/driveItem/content`;
+    } catch {
+        return null;
+    }
+}
+
+function withDownloadQuery(url) {
+    const parsed = tryParseUrl(url);
+
+    if (!parsed) {
+        return null;
+    }
+
+    parsed.searchParams.set('download', '1');
+
+    return parsed.toString();
+}
+
+function buildSharePointApiUrls(file) {
+    const urls = [];
+    const addUrl = (value) => {
+        if (typeof value === 'string' && value.trim() && !urls.includes(value)) {
+            urls.push(value);
+        }
+    };
+
+    const baseUrl = firstString(file.baseUrl, file.fileInfo?.siteUrl);
+    const shareUrl = file.fileInfo?.shareUrl;
+    const itemId = firstString(file.sharepointIds?.listItemUniqueId, file.itemid, file.id);
+    const siteId = file.sharepointIds?.siteId;
+
+    for (const fileUrl of [file.objectUrl, file.fileInfo?.fileUrl]) {
+        addUrl(buildDriveRootContentUrl(fileUrl));
+    }
+
+    if (shareUrl) {
+        try {
+            const origin = new URL(shareUrl).origin;
+            const encoded = encodeSharePointSharingUrl(shareUrl);
+
+            addUrl(`${origin}/_api/v2.0/shares/${encoded}/driveItem/content`);
+        } catch {
+            // Ignore invalid sharing URLs.
+        }
+    }
+
+    if (baseUrl && itemId) {
+        const trimmedBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+
+        addUrl(`${trimmedBase}/_api/v2.0/drive/items/${itemId}/content`);
+    }
+
+    if (siteId && itemId && baseUrl) {
+        try {
+            const origin = new URL(baseUrl).origin;
+
+            addUrl(`${origin}/_api/v2.0/sites/${siteId}/drive/items/${itemId}/content`);
+        } catch {
+            // Ignore invalid site URLs.
+        }
+    }
+
+    return urls;
+}
+
 function getFileMediaUrl(file) {
+    const shareUrl = file.fileInfo?.shareUrl;
+    const objectUrl = file.objectUrl;
+
     return firstString(
+        file.filePreview?.previewUrl,
+        ...buildSharePointApiUrls(file),
         file.downloadUrl,
         file.downloadURL,
         file.fileDownloadUrl,
         file.fileDownloadURL,
         file.contentUrl,
-        file.objectUrl,
+        file.fileInfo?.fileUrl,
+        shareUrl,
+        objectUrl,
         file.url,
-        file.filePreview?.previewUrl,
     );
 }
 
 function getFileMediaId(file, url) {
     return firstString(file.itemid, file.id, file.objectId, file.driveItemId, getAmsObjectIdFromUrl(url), url);
+}
+
+function getFileDownloadUrls(media) {
+    const urls = [];
+    const addUrl = (value) => {
+        if (typeof value === 'string' && value.trim() && !urls.includes(value)) {
+            urls.push(value);
+        }
+    };
+
+    if (media.source === 'file' && media.raw && typeof media.raw === 'object') {
+        const file = media.raw;
+
+        addUrl(buildGraphShareContentUrl(file.fileInfo?.shareUrl));
+
+        for (const apiUrl of buildSharePointApiUrls(file)) {
+            addUrl(apiUrl);
+        }
+
+        addUrl(withDownloadQuery(file.fileInfo?.shareUrl));
+        addUrl(withDownloadQuery(file.objectUrl));
+        addUrl(withDownloadQuery(file.fileInfo?.fileUrl));
+        addUrl(file.downloadUrl);
+        addUrl(file.downloadURL);
+        addUrl(file.fileDownloadUrl);
+        addUrl(file.fileDownloadURL);
+        addUrl(file.contentUrl);
+        addUrl(file.fileInfo?.fileUrl);
+        addUrl(file.fileInfo?.shareUrl);
+        addUrl(file.objectUrl);
+        addUrl(file.url);
+    }
+
+    addUrl(media.url);
+
+    return urls;
+}
+
+function isHtmlPayload(buffer, contentType) {
+    if (contentType?.toLowerCase().includes('text/html')) {
+        return true;
+    }
+
+    const prefix = buffer.subarray(0, 256).toString('utf8').trimStart().toLowerCase();
+
+    return prefix.startsWith('<!doctype html') || prefix.startsWith('<html');
+}
+
+function isCorruptDownloadedFile(filePath, expectedExtension) {
+    if (!fs.existsSync(filePath)) {
+        return false;
+    }
+
+    const extension = normalizeMediaExtension(path.extname(filePath));
+
+    if (extension === 'html' || extension === 'htm') {
+        return false;
+    }
+
+    const sample = Buffer.alloc(256);
+    const fd = fs.openSync(filePath, 'r');
+
+    try {
+        const bytesRead = fs.readSync(fd, sample, 0, sample.length, 0);
+        const content = sample.subarray(0, bytesRead).toString('utf8').trimStart().toLowerCase();
+
+        return content.startsWith('<!doctype html') || content.startsWith('<html');
+    } finally {
+        fs.closeSync(fd);
+    }
 }
 
 function addTarget(targetsByKey, target) {
@@ -169,6 +344,7 @@ function addTarget(targetsByKey, target) {
  */
 export function extractMediaFromMessage(message) {
     const targetsByKey = new Map();
+    const coveredAmsObjectIds = new Set();
     const content = message.content ?? '';
     const amsReferences = parseJsonishArray(message.amsreferences ?? message.amsReferences);
     const properties = message.properties ?? {};
@@ -184,6 +360,16 @@ export function extractMediaFromMessage(message) {
             continue;
         }
 
+        if (mediaId) {
+            coveredAmsObjectIds.add(mediaId);
+        }
+
+        const objectIdFromUrl = getAmsObjectIdFromUrl(url);
+
+        if (objectIdFromUrl) {
+            coveredAmsObjectIds.add(objectIdFromUrl);
+        }
+
         addTarget(targetsByKey, {
             extension: normalizeMediaExtension(attributes.itemscope) ?? getExtensionFromUrl(url),
             mediaId,
@@ -195,7 +381,7 @@ export function extractMediaFromMessage(message) {
     }
 
     for (const objectId of amsReferences) {
-        if (typeof objectId !== 'string') {
+        if (typeof objectId !== 'string' || coveredAmsObjectIds.has(objectId)) {
             continue;
         }
 
@@ -216,9 +402,27 @@ export function extractMediaFromMessage(message) {
             continue;
         }
 
+        const previewUrl = firstString(file.filePreview?.previewUrl);
         const mediaUrl = getFileMediaUrl(file);
 
-        if (!mediaUrl) {
+        if (!mediaUrl && !previewUrl) {
+            continue;
+        }
+
+        if (previewUrl && isAmsMediaUrl(previewUrl)) {
+            const previewMediaId = getFileMediaId(file, previewUrl);
+
+            addTarget(targetsByKey, {
+                extension: getExtensionFromUrl(previewUrl),
+                mediaId: previewMediaId,
+                originalFilename: firstString(file.fileName, file.name, file.title),
+                raw: file,
+                source: 'file-preview',
+                url: previewUrl,
+            });
+        }
+
+        if (!mediaUrl || (previewUrl && mediaUrl === previewUrl)) {
             continue;
         }
 
@@ -319,18 +523,58 @@ export async function downloadMediaForMessages({
         for (const media of mediaTargets) {
             database.upsertMessageMedia(conversationId, messageId, media);
 
-            const existing = database.getMessageMedia(conversationId, messageId, media.mediaId, media.url);
-            if (existing?.local_path && fs.existsSync(existing.local_path)) {
-                if (existing.download_status !== 'downloaded') {
-                    database.markMessageMediaDownloaded(conversationId, messageId, media, {
-                        byteSize: fs.statSync(existing.local_path).size,
-                        contentType: existing.content_type ?? null,
-                        localPath: existing.local_path,
-                    });
+            const downloadedMedia = database.getDownloadedMessageMedia(conversationId, messageId, media.mediaId);
+
+            if (downloadedMedia?.local_path) {
+                const downloadedAbsolutePath = path.isAbsolute(downloadedMedia.local_path)
+                    ? downloadedMedia.local_path
+                    : path.join(process.cwd(), downloadedMedia.local_path);
+
+                if (fs.existsSync(downloadedAbsolutePath) && !isCorruptDownloadedFile(downloadedAbsolutePath, media.extension)) {
+                    totals.skipped += 1;
+                    continue;
                 }
 
+                if (fs.existsSync(downloadedAbsolutePath)) {
+                    fs.unlinkSync(downloadedAbsolutePath);
+                }
+
+                database.resetMessageMediaForRetry(conversationId, messageId, media.mediaId);
+            }
+
+            const existing = database.getMessageMedia(conversationId, messageId, media.mediaId, media.url);
+
+            if (
+                existing?.download_status === 'failed'
+                && typeof existing.error === 'string'
+                && (
+                    (existing.error.includes('(404)') && media.url.includes('asm.skype.com'))
+                    || existing.error.includes('SharePoint access denied')
+                )
+            ) {
                 totals.skipped += 1;
                 continue;
+            }
+
+            if (existing?.local_path && fs.existsSync(existing.local_path)) {
+                const existingAbsolutePath = path.isAbsolute(existing.local_path)
+                    ? existing.local_path
+                    : path.join(process.cwd(), existing.local_path);
+
+                if (isCorruptDownloadedFile(existingAbsolutePath, media.extension)) {
+                    fs.unlinkSync(existingAbsolutePath);
+                } else {
+                    if (existing.download_status !== 'downloaded') {
+                        database.markMessageMediaDownloaded(conversationId, messageId, media, {
+                            byteSize: fs.statSync(existingAbsolutePath).size,
+                            contentType: existing.content_type ?? null,
+                            localPath: existing.local_path,
+                        });
+                    }
+
+                    totals.skipped += 1;
+                    continue;
+                }
             }
 
             const existingExtension = getExtensionFromPath(existing?.local_path);
@@ -343,16 +587,20 @@ export async function downloadMediaForMessages({
             });
 
             if (fs.existsSync(expectedPath.absolutePath)) {
-                if (!existing?.local_path || !pathsMatch(existing.local_path, expectedPath.relativePath) || existing.download_status !== 'downloaded') {
-                    database.markMessageMediaDownloaded(conversationId, messageId, media, {
-                        byteSize: fs.statSync(expectedPath.absolutePath).size,
-                        contentType: existing?.content_type ?? null,
-                        localPath: expectedPath.relativePath,
-                    });
-                }
+                if (isCorruptDownloadedFile(expectedPath.absolutePath, media.extension)) {
+                    fs.unlinkSync(expectedPath.absolutePath);
+                } else {
+                    if (!existing?.local_path || !pathsMatch(existing.local_path, expectedPath.relativePath) || existing.download_status !== 'downloaded') {
+                        database.markMessageMediaDownloaded(conversationId, messageId, media, {
+                            byteSize: fs.statSync(expectedPath.absolutePath).size,
+                            contentType: existing?.content_type ?? null,
+                            localPath: expectedPath.relativePath,
+                        });
+                    }
 
-                totals.skipped += 1;
-                continue;
+                    totals.skipped += 1;
+                    continue;
+                }
             }
 
             downloadTasks.push({ media, messageId });
@@ -361,7 +609,40 @@ export async function downloadMediaForMessages({
 
     await runWithConcurrency(downloadTasks, concurrency, async ({ media, messageId }) => {
         try {
-            const response = await api.downloadMedia(media.url);
+            const urlsToTry = media.source === 'file' ? getFileDownloadUrls(media) : [media.url];
+            let response = null;
+            let lastError = null;
+
+            for (const downloadUrl of urlsToTry) {
+                try {
+                    const candidate = await api.downloadMedia(downloadUrl);
+
+                    if (isHtmlPayload(candidate.buffer, candidate.contentType)) {
+                        lastError = new Error(`Teams media request returned HTML instead of file content (${downloadUrl})`);
+                        continue;
+                    }
+
+                    response = candidate;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    const message = error instanceof Error ? error.message : String(error);
+                    const isSharePointCandidate = downloadUrl.includes('sharepoint') || downloadUrl.includes('graph.microsoft.com');
+                    const isRetriableSharepoint = isSharePointCandidate
+                        && media.source === 'file'
+                        && !message.includes('SharePoint access denied')
+                        && (message.includes('(401)') || message.includes('(403)') || message.includes('(404)'));
+
+                    if (!isRetriableSharepoint) {
+                        throw error;
+                    }
+                }
+            }
+
+            if (!response) {
+                throw lastError ?? new Error('Teams media download failed.');
+            }
+
             const extension = media.extension ?? getExtensionFromContentType(response.contentType) ?? getExtensionFromUrl(response.finalUrl) ?? 'bin';
 
             const outputPath = buildOutputPath({
